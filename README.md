@@ -163,10 +163,6 @@ ctest --output-on-failure
 - Uses [Qt](https://www.qt.io/) framework
 - Cryptography via [OpenSSL](https://github.com/openssl/openssl)
 
-## Contributing
-
-Contributions welcome! Please read [CONTRIBUTING.md](CONTRIBUTING.md) first.
-
 ## Related Projects
 
 - [status-keycard-qt](../status-keycard-qt/) - High-level Session API
