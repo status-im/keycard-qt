@@ -1,0 +1,270 @@
+name: Tests
+run-name: Run keycard-qt tests
+
+on:
+  push:
+    branches:
+      - main
+      - master
+      - develop
+  pull_request:
+    branches:
+      - main
+      - master
+      - develop
+  workflow_dispatch:
+
+jobs:
+  # Multi-platform build and test
+  build-and-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux builds
+          - os: ubuntu-22.04
+            name: Linux
+            qt_arch: linux_gcc_64
+            qt_target: desktop
+            cmake_generator: "Unix Makefiles"
+            
+          # macOS builds  
+          - os: macos-13
+            name: macOS (Intel)
+            qt_arch: clang_64
+            qt_target: desktop
+            cmake_generator: "Unix Makefiles"
+            
+          - os: macos-14
+            name: macOS (ARM64)
+            qt_arch: clang_64
+            qt_target: desktop
+            cmake_generator: "Unix Makefiles"
+            
+          # iOS builds
+          - os: macos-14
+            name: iOS
+            qt_arch: ios
+            qt_target: ios
+            cmake_generator: "Unix Makefiles"
+            is_ios: true
+            
+          # Android builds
+          - os: ubuntu-22.04
+            name: Android (ARM64)
+            qt_arch: android_arm64_v8a
+            qt_target: android
+            cmake_generator: "Unix Makefiles"
+            is_android: true
+            android_abi: arm64-v8a
+            
+          # Windows builds
+          - os: windows-2022
+            name: Windows (MSVC)
+            qt_arch: win64_msvc2022_64
+            qt_target: desktop
+            cmake_generator: "Visual Studio 17 2022"
+
+    runs-on: ${{ matrix.os }}
+    name: ${{ matrix.name }}
+      
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: false
+          fetch-depth: 1
+
+      - name: Clean workspace if retrying job
+        if: ${{ github.run_attempt > 1 }}
+        shell: bash
+        run: |
+          git reset --hard
+          git clean -xfd
+
+      # Install Qt host tools for cross-compilation (iOS/Android)
+      - name: Install Qt host tools
+        if: matrix.is_ios == true || matrix.is_android == true
+        uses: jurplel/install-qt-action@v3
+        with:
+          version: '6.9.2'
+          target: 'desktop'
+          arch: ${{ runner.os == 'macOS' && 'clang_64' || 'linux_gcc_64' }}
+          cache: true
+      
+      - name: Debug Qt installation
+        if: matrix.is_ios == true || matrix.is_android == true
+        shell: bash
+        run: |
+          echo "=== Qt Installation Debug ==="
+          echo "RUNNER_WORKSPACE: $RUNNER_WORKSPACE"
+          echo "Searching for Qt installations..."
+          find ${RUNNER_WORKSPACE}/Qt -type d -maxdepth 3 2>/dev/null || true
+          ls -la ${RUNNER_WORKSPACE}/Qt/ 2>/dev/null || true
+
+      # Install Qt
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v3
+        with:
+          version: '6.9.2'
+          arch: ${{ matrix.qt_arch }}
+          target: ${{ matrix.qt_target }}
+          cache: true
+          modules: ${{ (matrix.is_ios || matrix.is_android) && 'qtconnectivity' || '' }}
+
+      # Linux-specific dependencies
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y libpcsclite-dev pkg-config libssl-dev
+          
+          echo "=== Verifying installations ==="
+          pkg-config --modversion libpcsclite
+          openssl version
+
+      # macOS-specific setup
+      - name: Install macOS dependencies
+        if: runner.os == 'macOS'
+        run: |
+          # PC/SC framework is already available on macOS
+          # Just verify OpenSSL is available
+          echo "=== Verifying installations ==="
+          if [ -f "/System/Library/Frameworks/PCSC.framework/PCSC" ]; then
+            echo "✓ PCSC framework found"
+          else
+            echo "⚠ PCSC framework not found at expected location"
+          fi
+          openssl version
+
+      # Windows-specific setup
+      - name: Setup Windows dependencies
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          # winscard.lib is part of Windows SDK, should be available
+          echo "=== Windows Environment ==="
+          echo "OpenSSL version:"
+          openssl version || echo "OpenSSL not in PATH"
+
+      # Android-specific setup
+      - name: Setup Android NDK
+        if: matrix.is_android
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r27c
+          local-cache: true
+
+      - name: Configure CMake
+        shell: bash
+        run: |
+          mkdir -p build
+          cd build
+          
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cmake .. \
+              -G "${{ matrix.cmake_generator }}" \
+              -A x64 \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DBUILD_TESTING=ON
+          elif [ "${{ matrix.is_ios }}" = "true" ]; then
+            # iOS cross-compilation (matching status-desktop approach)
+            QT_ROOT="${RUNNER_WORKSPACE}/Qt/6.9.2"
+            QT_IOS_PATH="${QT_ROOT}/ios"
+            QT_HOST_PATH="${QT_ROOT}/macos"
+            
+            echo "Qt iOS path: $QT_IOS_PATH"
+            
+            cmake .. \
+              -G "${{ matrix.cmake_generator }}" \
+              -DCMAKE_SYSTEM_NAME=iOS \
+              -DCMAKE_OSX_ARCHITECTURES="arm64" \
+              -DCMAKE_OSX_SYSROOT="iphoneos" \
+              -DQT_HOST_PATH:PATH="$QT_HOST_PATH" \
+              -DCMAKE_XCODE_ATTRIBUTE_IPHONEOS_DEPLOYMENT_TARGET=12.0 \
+              -DCMAKE_FIND_ROOT_PATH="$QT_IOS_PATH" \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DBUILD_TESTING=OFF
+          elif [ "${{ matrix.is_android }}" = "true" ]; then
+            # Android cross-compilation
+            # The install-qt-action installs Qt in the workspace by default
+            QT_ROOT="${RUNNER_WORKSPACE}/Qt/6.9.2"
+            QT_ANDROID_PATH="${QT_ROOT}/android_arm64_v8a"
+            QT_HOST_PATH="${QT_ROOT}/gcc_64"
+            
+            echo "Qt root: $QT_ROOT"
+            echo "Qt Android path: $QT_ANDROID_PATH"
+            echo "Qt Host path: $QT_HOST_PATH"
+            
+            # Verify paths exist
+            if [ ! -d "$QT_ANDROID_PATH" ]; then
+              echo "Error: Qt Android path not found at $QT_ANDROID_PATH"
+              echo "Searching for Qt installation..."
+              find ${RUNNER_WORKSPACE} -name "android_arm64_v8a" -type d 2>/dev/null || true
+              exit 1
+            fi
+            
+            cmake .. \
+              -G "${{ matrix.cmake_generator }}" \
+              -DCMAKE_SYSTEM_NAME=Android \
+              -DCMAKE_ANDROID_NDK=$ANDROID_NDK_ROOT \
+              -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_ROOT/build/cmake/android.toolchain.cmake \
+              -DANDROID_ABI=${{ matrix.android_abi }} \
+              -DANDROID_PLATFORM=android-26 \
+              -DQT_HOST_PATH:PATH="$QT_HOST_PATH" \
+              -DCMAKE_PREFIX_PATH="$QT_ANDROID_PATH" \
+              -DCMAKE_FIND_ROOT_PATH="$QT_ANDROID_PATH" \
+              -DQt6_DIR="$QT_ANDROID_PATH/lib/cmake/Qt6" \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DBUILD_TESTING=OFF
+          else
+            cmake .. \
+              -G "${{ matrix.cmake_generator }}" \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DBUILD_TESTING=ON
+          fi
+
+      - name: Build
+        shell: bash
+        run: |
+          cd build
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cmake --build . --config Release -j
+          else
+            cmake --build . -j$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 2)
+          fi
+
+      - name: Run tests
+        if: ${{ !matrix.is_ios && !matrix.is_android }}
+        shell: bash
+        run: |
+          cd build
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            # Windows: retry flaky tests up to 3 times
+            ctest --output-on-failure --verbose -C Release --repeat until-pass:3
+          else
+            ctest --output-on-failure --verbose
+          fi
+
+      - name: Test Summary
+        if: always() && !matrix.is_ios && !matrix.is_android
+        shell: bash
+        run: |
+          if [ -f build/Testing/Temporary/LastTest.log ]; then
+            echo "=== Test Results ==="
+            cat build/Testing/Temporary/LastTest.log
+          fi
+
+      - name: Upload build artifacts
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: keycard-qt-${{ matrix.name }}
+          path: |
+            build/libkeycard-qt.*
+            build/keycard-qt.dll
+            build/keycard-qt.lib
+            build/Release/keycard-qt.*
+            build/**/*.a
+          if-no-files-found: ignore
+          retention-days: 7
