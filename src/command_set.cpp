@@ -953,21 +953,23 @@ bool CommandSet::factoryReset()
     APDU::Command cmd = buildCommand(APDU::INS_FACTORY_RESET, APDU::P1FactoryResetMagic, APDU::P2FactoryResetMagic);
     APDU::Response resp = send(cmd, false);
     
-    if (checkOK(resp)) {
-        // Reset secure channel after factory reset
-        m_secureChannel->reset();
-        m_appInfo = ApplicationInfo();
-        m_pairingInfo = PairingInfo();
-        m_cardInstanceUID.clear();
-        m_cachedStatus = Keycard::ApplicationStatus();
-        m_channel->forceScan();
-        return true;
+    if (!checkOK(resp)) {
+        return false;
     }
 
+    // Reset secure channel after factory reset
+    m_secureChannel->reset();
+    m_appInfo = ApplicationInfo();
+    m_pairingInfo = PairingInfo();
+    m_cardInstanceUID.clear();
+    m_cachedStatus = Keycard::ApplicationStatus();
+    m_channel->forceScan();
+
     if (m_pairingStorage) {
+        qDebug() << "CommandSet::factoryReset(): Removing pairing from storage";
         m_pairingStorage->remove(appInfo.instanceUID.toHex());
     }
-    return false;
+    return true;
 }
 
 void CommandSet::resetSecureChannel()
