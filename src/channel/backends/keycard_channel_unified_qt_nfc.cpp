@@ -107,8 +107,15 @@ void KeycardChannelUnifiedQtNfc::disconnect()
 void KeycardChannelUnifiedQtNfc::forceScan()
 {
     qDebug() << "KeycardChannelUnifiedQtNfc::forceScan()";
-    disconnect();
+    
+    // CRITICAL: Stop detection BEFORE disconnect to avoid emitting signals with invalid state
+    // stopDetection() may emit channelStateChanged signal, so do it while target is still valid
     stopDetection();
+    
+    // Now safe to disconnect - target will be freed
+    disconnect();
+    
+    // Restart detection for new scan
     startDetection();
 }
 
@@ -125,10 +132,6 @@ void KeycardChannelUnifiedQtNfc::onTargetDetected(QNearFieldTarget* target)
     
     QByteArray newUid = target->uid();
     QString newUidHex = newUid.toHex();
-
-    if (m_target != target) {
-        disconnect();
-    }
         
     m_target = target;
     
@@ -257,6 +260,14 @@ QByteArray KeycardChannelUnifiedQtNfc::transmit(const QByteArray& apdu)
     QNearFieldTarget::RequestId requestId;
     QNearFieldTarget* target = m_target; // Capture locally
     
+    // CRITICAL: Check if target is valid before using it
+    if (!target) {
+        qWarning() << "KeycardChannelUnifiedQtNfc::transmit() - target is null, cannot send";
+        delete pending;
+        updateChannelState(ChannelOperationalState::Error);
+        throw new std::runtime_error("Target is null, cannot send");
+    }
+    
     if (QThread::currentThread() == target->thread()) {
         // Same thread: send and register immediately (no gap for race condition)
         requestId = target->sendCommand(apdu);
@@ -283,11 +294,8 @@ QByteArray KeycardChannelUnifiedQtNfc::transmit(const QByteArray& apdu)
         m_pendingRequests.removeOne(pending);
         delete pending;
         
-        QByteArray error;
-        error.append(static_cast<char>(0x6F)); // SW1
-        error.append(static_cast<char>(0x03)); // SW2: Invalid request ID
         updateChannelState(ChannelOperationalState::Error);
-        return error;
+        throw new std::runtime_error("Send command failed, tag may be stale");
     }
     
     QTimer timeout;
@@ -316,10 +324,7 @@ QByteArray KeycardChannelUnifiedQtNfc::transmit(const QByteArray& apdu)
         }
         
         updateChannelState(ChannelOperationalState::Error);
-        QByteArray error;
-        error.append(static_cast<char>(0x6F)); // SW1
-        error.append(static_cast<char>(0x00)); // SW2: Timeout or stale tag
-        return error;
+        throw new std::runtime_error("Timeout or stale tag detected");
     }
     
     QByteArray response = foundReq->response;

@@ -43,31 +43,20 @@ CommunicationManager::~CommunicationManager() {
     stop();
 }
 
-bool CommunicationManager::init(std::shared_ptr<KeycardChannel> channel,
-                                 std::shared_ptr<IPairingStorage> pairingStorage,
-                                 PairingPasswordProvider passwordProvider) {
+bool CommunicationManager::init(std::shared_ptr<CommandSet> commandSet) {
     if (m_running) {
         qWarning() << "CommunicationManager: Already initialized";
         return false;
     }
     
-    if (!channel) {
-        qWarning() << "CommunicationManager: No channel provided";
+    if (!commandSet) {
+        qWarning() << "CommunicationManager: No command set provided";
         return false;
     }
     
-    qDebug() << "CommunicationManager: Initializing...";
+    qDebug() << "CommunicationManager: Initializing with CommandSet...";
     
-    m_channel = channel;
-    m_pairingStorage = pairingStorage;
-    m_passwordProvider = passwordProvider;
-    
-    // Create CommandSet
-    m_commandSet = std::make_shared<CommandSet>(m_channel, m_pairingStorage, m_passwordProvider);
-    
-    // Disconnect CommandSet from channel signals to prevent race with our handlers
-    QObject::disconnect(m_channel.get(), nullptr, m_commandSet.get(), nullptr);
-    qDebug() << "CommunicationManager: Disconnected CommandSet from channel signals";
+    m_commandSet = commandSet;
     
     // Create and start communication thread
     m_commThread = new CommunicationThread(this);
@@ -75,13 +64,18 @@ bool CommunicationManager::init(std::shared_ptr<KeycardChannel> channel,
     // Move manager to communication thread so all slots run there
     moveToThread(m_commThread);
     
-    // Connect channel signals (will be delivered on communication thread)
-    connect(m_channel.get(), &KeycardChannel::targetDetected,
-            this, &CommunicationManager::onCardDetected,
+    // Connect to CommandSet signals (queued - cross-thread)
+    // CommandSet lives on main thread, manager on communication thread
+    connect(m_commandSet.get(), &CommandSet::cardReady,
+            this, &CommunicationManager::onCardReady,
             Qt::QueuedConnection);
     
-    connect(m_channel.get(), &KeycardChannel::targetLost,
-            this, &CommunicationManager::onCardRemoved,
+    connect(m_commandSet.get(), &CommandSet::cardLost,
+            this, &CommunicationManager::onCardLost,
+            Qt::QueuedConnection);
+    
+    connect(m_commandSet.get(), &CommandSet::channelStateChanged,
+            this, &CommunicationManager::onChannelStateChanged,
             Qt::QueuedConnection);
     
     m_commThread->start();
@@ -89,47 +83,40 @@ bool CommunicationManager::init(std::shared_ptr<KeycardChannel> channel,
     m_running = true;
     setState(State::Idle);
     
-    qDebug() << "CommunicationManager: Initialized successfully (detection not started yet)";
+    qDebug() << "CommunicationManager: Initialized successfully with CommandSet";
+    qDebug() << "CommunicationManager: CommandSet owns channel - no race conditions!";
     return true;
 }
 
+
 bool CommunicationManager::startDetection() {
-    if (!m_running) {
+    if (!m_running || !m_commandSet) {
         qWarning() << "CommunicationManager: Not initialized, call init() first";
-        return false;
-    }
-    
-    if (!m_channel) {
-        qWarning() << "CommunicationManager: No channel available";
         return false;
     }
     
     qDebug() << "CommunicationManager: Starting card detection...";
     
-    // Start channel detection
-    QMetaObject::invokeMethod(m_channel.get(), &KeycardChannel::startDetection,
+    QMetaObject::invokeMethod(m_commandSet.get(),
+                               &CommandSet::startDetection,
                                Qt::QueuedConnection);
     
-    qDebug() << "CommunicationManager: Card detection started";
+    qDebug() << "CommunicationManager: Card detection started via CommandSet";
     return true;
 }
 
 void CommunicationManager::stopDetection() {
-    if (!m_channel) {
+    if (!m_commandSet) {
         return;
     }
     
     qDebug() << "CommunicationManager: Stopping card detection...";
     
-    QMetaObject::invokeMethod(m_channel.get(), &KeycardChannel::stopDetection,
+    QMetaObject::invokeMethod(m_commandSet.get(),
+                               &CommandSet::stopDetection,
                                Qt::QueuedConnection);
     
-    // Set channel to Idle
-    if (m_channel) {
-        m_channel->setState(ChannelState::Idle);
-    }
-    
-    qDebug() << "CommunicationManager: Card detection stopped";
+    qDebug() << "CommunicationManager: Card detection stopped via CommandSet";
 }
 
 void CommunicationManager::stop() {
@@ -150,11 +137,6 @@ void CommunicationManager::stop() {
         // std::queue doesn't have clear(), use swap with empty queue
         std::queue<std::unique_ptr<CardCommand>>().swap(m_queue);
         m_queueNotEmpty.wakeAll();
-        
-        // Set channel to Idle when stopping
-        if (m_channel) {
-            m_channel->setState(ChannelState::Idle);
-        }
     }
     
     // Stop thread
@@ -202,33 +184,10 @@ QUuid CommunicationManager::enqueueCommand(std::unique_ptr<CardCommand> cmd) {
     // This triggers card detection/presentation:
     // - iOS: Opens NFC drawer for user to present card
     // - Android/Desktop: Continues polling (already active)
-    if (m_channel) {
-        QThread* currentThread = QThread::currentThread();
-        QThread* channelThread = m_channel->thread();
-        QThread* mainThread = QCoreApplication::instance()->thread();
-        
-        if (currentThread == channelThread) {
-            // Same thread - call directly
-            qDebug() << "CommunicationManager: Setting channel state directly (same thread)";
-            m_channel->setState(ChannelState::WaitingForCard);
-        } else if (currentThread == mainThread) {
-            // Main thread calling, channel on different thread
-            // Use QueuedConnection - will be processed by processEvents() in wait loop
-            qDebug() << "CommunicationManager: Queueing channel state (main thread → channel thread)";
-            QMetaObject::invokeMethod(m_channel.get(), [this]() {
-                m_channel->setState(ChannelState::WaitingForCard);
-            }, Qt::QueuedConnection);
-        } else {
-            // Background thread calling
-            // Use BlockingQueuedConnection to ensure setState completes before we block
-            qDebug() << "CommunicationManager: Blocking channel state (background thread → channel thread)";
-            QMetaObject::invokeMethod(m_channel.get(), [this]() {
-                m_channel->setState(ChannelState::WaitingForCard);
-            }, Qt::BlockingQueuedConnection);
-        }
-    }
+    startDetection();
     
     // Trigger queue processing on communication thread
+    // If card is not ready yet, processQueue will wait for cardReady signal
     QMetaObject::invokeMethod(this, &CommunicationManager::processQueue,
                                Qt::QueuedConnection);
     
@@ -251,13 +210,14 @@ CommandResult CommunicationManager::executeCommandSync(std::unique_ptr<CardComma
              << "token:" << token << "timeout:" << timeoutMs
              << "thread:" << QThread::currentThread();
     
-    // Create sync tracker
-    PendingSync sync;
-    sync.completed = false;
+    // Create sync tracker on HEAP to prevent dangling pointer
+    // Use shared_ptr so it stays valid even after this function returns
+    auto sync = std::make_shared<PendingSync>();
+    sync->completed = false;
     
     {
         QMutexLocker locker(&m_syncMutex);
-        m_pendingSync[token] = &sync;
+        m_pendingSync[token] = sync;
     }
     
     // Enqueue command (this will set channel state)
@@ -278,7 +238,7 @@ CommandResult CommunicationManager::executeCommandSync(std::unique_ptr<CardComma
         
         QMutexLocker locker(&m_syncMutex);
         
-        while (!sync.completed && timer.elapsed() < timeoutMs) {
+        while (!sync->completed && timer.elapsed() < timeoutMs) {
             // Unlock mutex to allow event processing
             locker.unlock();
             
@@ -289,8 +249,8 @@ CommandResult CommunicationManager::executeCommandSync(std::unique_ptr<CardComma
             // Re-lock and check completion
             locker.relock();
             
-            if (!sync.completed) {
-                sync.condition.wait(&m_syncMutex, 100);
+            if (!sync->completed) {
+                sync->condition.wait(&m_syncMutex, 100);
             }
         }
     } else {
@@ -299,24 +259,31 @@ CommandResult CommunicationManager::executeCommandSync(std::unique_ptr<CardComma
         
         QMutexLocker locker(&m_syncMutex);
         
-        if (!sync.completed) {
-            bool success = sync.condition.wait(&m_syncMutex, timeoutMs);
+        if (!sync->completed) {
+            bool success = sync->condition.wait(&m_syncMutex, timeoutMs);
             if (!success) {
                 qWarning() << "CommunicationManager: Sync command timed out:" << cmdName;
-                sync.result = CommandResult::fromError("Command timeout");
+                sync->result = CommandResult::fromError("Command timeout");
             }
         }
     }
     
-    // Check final result
-    if (!sync.completed) {
-        qWarning() << "CommunicationManager: Sync command timed out:" << cmdName;
-        sync.result = CommandResult::fromError("Command timeout");
+    // Check final result and get return value while sync is still valid
+    CommandResult finalResult;
+    {
+        QMutexLocker locker(&m_syncMutex);
+        if (!sync->completed) {
+            qWarning() << "CommunicationManager: Sync command timed out:" << cmdName;
+            finalResult = CommandResult::fromError("Command timeout");
+        } else {
+            finalResult = sync->result;
+        }
+        
+        // Remove from map - shared_ptr will keep it alive if comm thread still has reference
+        m_pendingSync.remove(token);
     }
     
-    m_pendingSync.remove(token);
-    
-    return sync.result;
+    return finalResult;
 }
 
 CommunicationManager::State CommunicationManager::state() const {
@@ -367,11 +334,15 @@ void CommunicationManager::setState(State newState) {
 // Card Detection and Initialization (Communication Thread)
 // ============================================================================
 
-void CommunicationManager::onCardDetected(const QString& uid) {
+void CommunicationManager::onCardReady(const QString& uid) {
     qDebug() << "========================================";
-    qDebug() << "CommunicationManager: CARD DETECTED! UID:" << uid;
+    qDebug() << "CommunicationManager: CARD READY! UID:" << uid;
     qDebug() << "   Thread:" << QThread::currentThread();
     qDebug() << "   Current state:" << m_state;
+    qDebug() << "========================================";
+    qDebug() << "   CommandSet has already:";
+    qDebug() << "   - Reset secure channel (if re-detection)";
+    qDebug() << "   - Executed SELECT applet";
     qDebug() << "========================================";
     
     // Check if we're already processing this card
@@ -380,9 +351,9 @@ void CommunicationManager::onCardDetected(const QString& uid) {
         return;
     }
     
-    // Check if we should process this card detection
+    // Check if we should process this card
     if (m_state != State::Idle) {
-        qDebug() << "CommunicationManager: Card detected but not in Idle state, ignoring";
+        qDebug() << "CommunicationManager: Card ready but not in Idle state, ignoring";
         return;
     }
     
@@ -390,9 +361,9 @@ void CommunicationManager::onCardDetected(const QString& uid) {
     setState(State::Initializing);
     
     // =========================================================================
-    // CRITICAL: Run initialization sequence atomically
-    // This is the key to preventing the race condition!
-    // NO other operations can run until this completes.
+    // Complete initialization: PAIR + OPEN SECURE CHANNEL + GET STATUS
+    // CommandSet has already done: resetSecureChannel() + SELECT
+    // Now we need to establish the secure channel
     // =========================================================================
     
     qDebug() << "CommunicationManager: Starting card initialization sequence...";
@@ -418,16 +389,16 @@ void CommunicationManager::onCardDetected(const QString& uid) {
         qWarning() << "CommunicationManager: Card initialization FAILED:" << result.error;
         
         setState(State::Idle);
-        emit cardInitialized(result);
+        // initialization failed. Retry detection
+        startDetection();
     }
 }
 
-void CommunicationManager::onCardRemoved() {
+void CommunicationManager::onCardLost() {
     qDebug() << "========================================";
-    qDebug() << "CommunicationManager: CARD REMOVED";
+    qDebug() << "CommunicationManager: CARD LOST (from CommandSet)";
+    qDebug() << "   Thread:" << QThread::currentThread();
     qDebug() << "========================================";
-    
-    m_currentCardUID.clear();
     
     // Clear cached info
     {
@@ -438,6 +409,30 @@ void CommunicationManager::onCardRemoved() {
     
     setState(State::Idle);
     emit cardLost();
+}
+
+void CommunicationManager::onChannelStateChanged(ChannelState state) {
+    qDebug() << "CommunicationManager: Channel state changed to" << static_cast<int>(state);
+    
+    // Just log the state change
+    // CommandSet emits this signal when it calls startDetection() / stopDetection()
+    // We receive it here but don't need to forward it anywhere
+    // (The channel itself emits channelStateChanged for operational state tracking)
+    
+    QString stateName;
+    switch (state) {
+        case ChannelState::Idle:
+            stateName = "Idle";
+            break;
+        case ChannelState::WaitingForCard:
+            stateName = "WaitingForCard";
+            break;
+        default:
+            stateName = "Unknown";
+            break;
+    }
+    
+    qDebug() << "CommunicationManager: Channel lifecycle state:" << stateName;
 }
 
 CardInitializationResult CommunicationManager::initializeCardSequence() {
@@ -510,28 +505,38 @@ void CommunicationManager::processQueue() {
     
     QMutexLocker locker(&m_queueMutex);
     
-    if (m_queue.empty()) {
-        // Set channel to Idle when queue is empty
-        if (m_channel) {
-            m_channel->setState(ChannelState::Idle);
-        }
-        return;
+    // CRITICAL: Check state atomically to prevent race condition
+    // We must check BOTH state and queue under the same lock to ensure consistency
+    State currentState;
+    {
+        QMutexLocker stateLocker(&m_stateMutex);
+        currentState = m_state;
     }
-    
-    // Check if we can process commands
-    State currentState = state();
     
     if (currentState == State::Processing) {
         qDebug() << "CommunicationManager: Already processing a command, skipping";
         return;
     }
+
+    if (m_queue.empty()) {
+        // Only stop detection if we're NOT processing
+        // Double-check state hasn't changed
+        QMutexLocker stateLocker(&m_stateMutex);
+        if (m_state != State::Processing) {
+            qDebug() << "Empty command queue - stopping keycard detection";
+            locker.unlock();  // Release queue lock before calling stopDetection
+            stateLocker.unlock();
+            stopDetection();
+        }
+        return;
+    }
     
     // If card is not detected/initialized yet, wait for it
-    // The channel is already in WaitingForCard state (set by enqueueCommand)
-    // When card is detected, onCardDetected will initialize and then processQueue will be called again
+    // When card is detected, CommandSet will emit cardReady() which triggers onCardReady()
+    // onCardReady() will initialize and then call processQueue() again
     if (currentState == State::Idle) {
-        qDebug() << "CommunicationManager: Card not detected yet, waiting...";
-        qDebug() << "CommunicationManager: Channel should be in WaitingForCard state";
+        qDebug() << "CommunicationManager: Card not ready yet, waiting...";
+        qDebug() << "CommunicationManager: Waiting for cardReady signal from CommandSet";
         // Don't process yet - wait for card detection
         return;
     }
@@ -562,27 +567,17 @@ void CommunicationManager::processQueue() {
         {
             QMutexLocker syncLocker(&m_syncMutex);
             if (m_pendingSync.contains(token)) {
-                PendingSync* sync = m_pendingSync[token];
+                auto sync = m_pendingSync[token];  // shared_ptr copy keeps it alive
                 sync->result = result;
                 sync->completed = true;
                 sync->condition.wakeAll();
             }
         }
         
-        // Set channel to Idle on error
-        if (m_queue.empty() && m_channel) {
-            m_channel->setState(ChannelState::Idle);
-        }
-        
         return;
     }
     
     locker.unlock();
-    
-    // Set channel to WaitingForCard before executing command
-    if (m_channel) {
-        m_channel->setState(ChannelState::WaitingForCard);
-    }
     
     // Execute command
     qDebug() << "CommunicationManager: Executing command:" << cmdName << "token:" << token;
@@ -594,7 +589,10 @@ void CommunicationManager::processQueue() {
         result = cmd->execute(m_commandSet.get());
     } catch (const std::exception& e) {
         qWarning() << "CommunicationManager: Command threw exception:" << e.what();
-        result = CommandResult::fromError(QString("Exception: %1").arg(e.what()));
+        // Re-queue at front
+        m_queue.push(std::move(cmd));
+        startDetection();
+        return;
     } catch (...) {
         qWarning() << "CommunicationManager: Command threw unknown exception";
         result = CommandResult::fromError("Unknown exception");
@@ -612,22 +610,15 @@ void CommunicationManager::processQueue() {
     {
         QMutexLocker syncLocker(&m_syncMutex);
         if (m_pendingSync.contains(token)) {
-            PendingSync* sync = m_pendingSync[token];
+            auto sync = m_pendingSync[token];  // shared_ptr copy keeps it alive
             sync->result = result;
             sync->completed = true;
             sync->condition.wakeAll();
         }
     }
     
-    // Check if queue is empty and set channel to Idle if so
-    {
-        QMutexLocker queueLocker(&m_queueMutex);
-        if (m_queue.empty() && m_channel) {
-            m_channel->setState(ChannelState::Idle);
-        }
-    }
-    
     // Process next command if any
+    // If queue is empty, processQueue() will handle stopDetection()
     QMetaObject::invokeMethod(this, &CommunicationManager::processQueue,
                                Qt::QueuedConnection);
 }

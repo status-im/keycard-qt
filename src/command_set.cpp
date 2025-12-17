@@ -92,18 +92,17 @@ CommandSet::CommandSet(std::shared_ptr<Keycard::KeycardChannel> channel,
         qDebug() << "CommandSet: Moved to main thread";
     }
 
-    QObject::connect(m_channel.get(), &Keycard::KeycardChannel::targetDetected, this, [this](const QString& uid) {
-        if (uid != m_targetId) {
-            qDebug() << "CommandSet::targetDetected(): Card swap detected";
-            m_targetId = uid;
-            handleCardSwap();
-        } else {
-            qDebug() << "CommandSet::targetDetected(): Card re-detected";
-            resetSecureChannel();
-        }
-
-        select(true);
-    });
+    // Connect to channel signals (we are the ONLY handler)
+    // Use DirectConnection to ensure synchronous execution on main thread
+    connect(m_channel.get(), &Keycard::KeycardChannel::targetDetected,
+            this, &CommandSet::onTargetDetected,
+            Qt::DirectConnection);
+    
+    connect(m_channel.get(), &Keycard::KeycardChannel::targetLost,
+            this, &CommandSet::onTargetLost,
+            Qt::DirectConnection);
+    
+    qDebug() << "CommandSet: Initialized with direct channel connections";
 }
 
 CommandSet::~CommandSet() {
@@ -1460,16 +1459,90 @@ APDU::Response CommandSet::send(const APDU::Command& cmd, bool secure)
         catch (const std::runtime_error& e) {
             qWarning() << "CommandSet::send(): Failed to send via secure channel:" << e.what();
             // Return error response
-            QByteArray errorResp;
-            errorResp.append(static_cast<char>(0x69)); // SW1: Command not allowed
-            errorResp.append(static_cast<char>(0x85)); // SW2: Conditions not satisfied
-            return APDU::Response(errorResp);
+            throw new std::runtime_error(e.what());
         }
     } else {
     // 3. Send directly via channel (no secure channel)
         qDebug() << "CommandSet::send(): Sending directly (no secure channel)";
-        QByteArray rawResp = m_channel->transmit(cmd.serialize());
-        return APDU::Response(rawResp);
+        try {
+            QByteArray rawResp = m_channel->transmit(cmd.serialize());
+            return APDU::Response(rawResp);
+        }
+        catch (const std::runtime_error& e) {
+            qWarning() << "CommandSet::send(): Failed to send directly:" << e.what();
+            throw new std::runtime_error(e.what());
+        }
+    }
+}
+
+// ========== Channel Management Implementation ==========
+
+void CommandSet::startDetection() {
+    qDebug() << "CommandSet::startDetection()";
+    
+    if (!m_channel) {
+        qWarning() << "CommandSet: No channel available";
+        return;
+    }
+    
+    // This runs on main thread, so it's safe to call directly
+    m_channel->setState(ChannelState::WaitingForCard);
+    emit channelStateChanged(ChannelState::WaitingForCard);
+}
+
+void CommandSet::stopDetection() {
+    qDebug() << "CommandSet::stopDetection()";
+    
+    if (!m_channel) {
+        qWarning() << "CommandSet: No channel available";
+        return;
+    }
+    
+    // This runs on main thread, so it's safe to call directly
+    m_channel->setState(ChannelState::Idle);
+    emit channelStateChanged(ChannelState::Idle);
+}
+
+void CommandSet::onTargetDetected(const QString& uid) {
+    qDebug() << "CommandSet::onTargetDetected:" << uid 
+             << "(thread:" << QThread::currentThreadId() << ")";
+    
+    // Check if same card or new card
+    if (uid != m_targetId) {
+        // Different card - full reset needed
+        qDebug() << "CommandSet: Card swap detected";
+        m_targetId = uid;
+        handleCardSwap();  // Clears ALL state
+    } else {
+        // Same card re-detected - crypto reset only
+        qDebug() << "CommandSet: Same card re-detected";
+        resetSecureChannel();  // Preserves pairing and auth state
+    }
+    
+    // CRITICAL: Don't call select() here - it blocks the main thread!
+    // CommunicationManager will call select() on its own thread when it processes cardReady
+    qDebug() << "CommandSet: Card detected, notifying CommunicationManager";
+    
+    // Notify that card is detected
+    // CommunicationManager will handle initialization (SELECT, etc.) on its own thread
+    emit cardReady(uid);
+}
+
+void CommandSet::onTargetLost() {
+    qDebug() << "CommandSet::onTargetLost"
+             << "(thread:" << QThread::currentThreadId() << ")";
+    
+    QString previousUID = m_targetId;
+    m_targetId.clear();
+    
+    // Reset secure channel state
+    // This ensures next detection starts fresh
+    resetSecureChannel();
+    
+    // Notify card loss only if we had a card before
+    if (!previousUID.isEmpty()) {
+        qDebug() << "CommandSet: Emitting cardLost for" << previousUID;
+        emit cardLost();
     }
 }
 

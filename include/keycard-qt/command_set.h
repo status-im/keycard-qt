@@ -378,6 +378,102 @@ public:
     }
     #endif
     
+    // ========== Channel Management API  ==========
+    /**
+     * @brief Start card detection
+     * 
+     * Sets channel to WaitingForCard state.
+     * Thread-safe: Runs on main thread where channel lives.
+     * 
+     * @note This is the ONLY public way to start detection.
+     *       CommunicationManager should use this instead of accessing channel directly.
+     */
+    void startDetection();
+    
+    /**
+     * @brief Stop card detection
+     * 
+     * Sets channel to Idle state.
+     * Thread-safe: Runs on main thread where channel lives.
+     * 
+     * @note This is the ONLY public way to stop detection.
+     *       CommunicationManager should use this instead of accessing channel directly.
+     */
+    void stopDetection();
+    
+    /**
+     * @brief Get current card UID
+     * @return Card UID or empty string if no card
+     */
+    QString currentCardUID() const { return m_targetId; }
+    
+    /**
+     * @brief Check if card is currently connected
+     * @return true if card is connected and ready
+     */
+    bool isCardConnected() const { return !m_targetId.isEmpty(); }
+    
+signals:
+    /**
+     * @brief Emitted when card is ready for commands
+     * @param uid Card UID
+     * 
+     * This is emitted after:
+     * - Card detected by channel
+     * - Secure channel state reset (if re-detection)
+     * - SELECT applet executed successfully
+     * 
+     * @note Guaranteed to be emitted AFTER resetSecureChannel() has been called.
+     *       This ensures CommunicationManager receives the signal only when
+     *       CommandSet has finished preparing the card.
+     */
+    void cardReady(const QString& uid);
+    
+    /**
+     * @brief Emitted when card is removed
+     * 
+     * This is emitted when the card is physically removed or connection lost.
+     */
+    void cardLost();
+    
+    /**
+     * @brief Emitted when channel state changes
+     * @param state New channel state
+     * 
+     * Allows CommunicationManager to track channel state without
+     * direct channel access. Emitted for: Idle, WaitingForCard, Reading, etc.
+     */
+    void channelStateChanged(ChannelState state);
+    
+private slots:
+    /**
+     * @brief Handle card detection from channel (INTERNAL)
+     * 
+     * This is the ONLY handler for channel->targetDetected signal.
+     * It runs synchronously on main thread before any other handlers.
+     * 
+     * Flow:
+     * 1. Check if same card or new card
+     * 2. Reset secure channel (for same card) or full reset (new card)
+     * 3. Execute SELECT applet
+     * 4. Emit cardReady() signal
+     * 
+     * @param uid Card UID from channel
+     */
+    void onTargetDetected(const QString& uid);
+    
+    /**
+     * @brief Handle card removal from channel (INTERNAL)
+     * 
+     * This is the ONLY handler for channel->targetLost signal.
+     * 
+     * Flow:
+     * 1. Clear card UID
+     * 2. Reset secure channel state
+     * 3. Emit cardLost() signal
+     */
+    void onTargetLost();
+    
 private:
     // Helper methods
     bool checkOK(const APDU::Response& response);

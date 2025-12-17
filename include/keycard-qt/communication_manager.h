@@ -82,19 +82,24 @@ public:
     ~CommunicationManager() override;
     
     /**
-     * @brief Initialize the communication manager (setup only, no detection)
-     * @param channel KeycardChannel to use for communication
-     * @param pairingStorage Storage for pairing info
-     * @param passwordProvider Provider for pairing passwords
+     * @brief Initialize the communication manager
+     * @param commandSet CommandSet instance that owns the channel
      * @return true on success
      * 
-     * This creates the communication thread, sets up the CommandSet,
-     * and connects channel signals, but does NOT start card detection.
+     * This is the new, cleaner initialization method where CommandSet
+     * owns the channel and manages all card detection signals.
+     * 
+     * Benefits:
+     * - No race conditions (CommandSet handles detection first)
+     * - Proper encapsulation (channel ownership)
+     * - Thread-safe (CommandSet on main thread, manager on comm thread)
+     * 
+     * This creates the communication thread and connects to CommandSet
+     * signals (cardReady, cardLost), but does NOT start card detection.
      * Call startDetection() to begin monitoring for cards.
      */
-    bool init(std::shared_ptr<KeycardChannel> channel,
-              std::shared_ptr<IPairingStorage> pairingStorage,
-              PairingPasswordProvider passwordProvider);
+    bool init(std::shared_ptr<CommandSet> commandSet);
+    
     
     /**
      * @brief Start card detection
@@ -206,19 +211,33 @@ signals:
     
 private slots:
     /**
-     * @brief Handle card detected signal from channel
+     * @brief Handle card ready signal from CommandSet
      * @param uid Card UID
      * 
-     * This is the critical method that prevents the race condition.
-     * It runs on the communication thread and performs the full
-     * initialization sequence atomically before allowing any commands.
+     * Called when CommandSet has finished processing card detection:
+     * - Secure channel has been reset (if re-detection)
+     * - SELECT has been executed successfully
+     * - Card is ready for commands
+     * 
+     * This runs on the communication thread (queued connection).
      */
-    void onCardDetected(const QString& uid);
+    void onCardReady(const QString& uid);
     
     /**
-     * @brief Handle card removed signal from channel
+     * @brief Handle card lost signal from CommandSet
+     * 
+     * Called when CommandSet detects card removal.
+     * Secure channel has already been reset by CommandSet.
      */
-    void onCardRemoved();
+    void onCardLost();
+    
+    /**
+     * @brief Handle channel state changed from CommandSet
+     * @param state New channel state
+     * 
+     * Allows tracking of channel state for operational state emission.
+     */
+    void onChannelStateChanged(ChannelState state);
     
     /**
      * @brief Process next command in queue
@@ -239,14 +258,10 @@ private:
      */
     class CommunicationThread : public QThread {
     public:
-        explicit CommunicationThread(CommunicationManager* manager)
-            : m_manager(manager) {}
+        explicit CommunicationThread(CommunicationManager* /*manager*/) {}
         
     protected:
         void run() override;
-        
-    private:
-        CommunicationManager* m_manager;
     };
     
     /**
@@ -282,7 +297,11 @@ private:
         CommandResult result;
         bool completed;
     };
-    QHash<QUuid, PendingSync*> m_pendingSync;
+    
+    // Use shared_ptr to prevent dangling pointers
+    // When executeCommandSync() returns, the PendingSync object remains valid
+    // until the communication thread finishes accessing it
+    QHash<QUuid, std::shared_ptr<PendingSync>> m_pendingSync;
     QMutex m_syncMutex;
     
     // State
@@ -291,10 +310,8 @@ private:
     QString m_currentCardUID;
     
     // Card components (accessed only from communication thread)
-    std::shared_ptr<KeycardChannel> m_channel;
+    // CommandSet owns channel, pairing storage, and password provider
     std::shared_ptr<CommandSet> m_commandSet;
-    std::shared_ptr<IPairingStorage> m_pairingStorage;
-    PairingPasswordProvider m_passwordProvider;
     
     // Cached card info
     ApplicationInfo m_appInfo;
