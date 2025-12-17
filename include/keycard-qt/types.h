@@ -8,6 +8,19 @@
 namespace Keycard {
 
 /**
+ * @brief Capability flags for keycard features
+ */
+enum class Capability : uint8_t {
+    None = 0x00,
+    SecureChannel = 0x01,
+    KeyManagement = 0x02,
+    CredentialsManagement = 0x04,
+    NDEF = 0x08,
+    FactoryReset = 0x10,
+    All = 0xFF
+};
+
+/**
  * @brief Application information returned by SELECT command
  */
 struct ApplicationInfo {
@@ -19,6 +32,7 @@ struct ApplicationInfo {
     bool installed;                   ///< True if keycard applet is installed
     bool initialized;                 ///< True if keycard is initialized
     QByteArray keyUID;                ///< Key UID if keys are loaded
+    uint8_t capabilities;             ///< Capability flags (bitmask)
     
     ApplicationInfo()
         : appVersion(0)
@@ -26,7 +40,22 @@ struct ApplicationInfo {
         , availableSlots(0)
         , installed(false)
         , initialized(false)
+        , capabilities(static_cast<uint8_t>(Capability::All))  // Assume all capabilities if not specified
     {}
+    
+    /**
+     * @brief Check if card has a specific capability
+     */
+    bool hasCapability(Capability cap) const {
+        return (capabilities & static_cast<uint8_t>(cap)) != 0;
+    }
+    
+    /**
+     * @brief Check if card supports factory reset command
+     */
+    bool hasFactoryResetCapability() const {
+        return hasCapability(Capability::FactoryReset);
+    }
 };
 
 /**

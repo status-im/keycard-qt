@@ -3,6 +3,7 @@
 
 #include "keycard-qt/keycard_channel.h"
 #include "keycard-qt/backends/keycard_channel_backend.h"
+#include "keycard-qt/globalplatform/gp_constants.h"
 #include <QDebug>
 
 #if defined(Q_OS_IOS) || defined(Q_OS_ANDROID)
@@ -218,7 +219,43 @@ QByteArray KeycardChannel::transmit(const QByteArray& apdu)
     if (!m_backend) {
         throw std::runtime_error("No backend available");
     }
-    return m_backend->transmit(apdu);
+    
+    QByteArray response = m_backend->transmit(apdu);
+    
+    // Handle incomplete response (T=0 protocol, ISO 7816-4)
+    // SW1 = 0x61 means "response bytes still available", SW2 = bytes remaining
+    // This is transparent to the caller - we automatically fetch remaining data
+    if (response.size() >= 2) {
+        uint8_t sw1 = static_cast<uint8_t>(response[response.size() - 2]);
+        uint8_t sw2 = static_cast<uint8_t>(response[response.size() - 1]);
+        
+        // Check if this is an incomplete response AND we're not already doing GET RESPONSE
+        if (sw1 == GlobalPlatform::SW1_RESPONSE_DATA_INCOMPLETE && apdu.size() >= 2) {
+            uint8_t cla = static_cast<uint8_t>(apdu[0]);
+            uint8_t ins = static_cast<uint8_t>(apdu[1]);
+            
+            // Avoid infinite loop - don't GET RESPONSE on a GET RESPONSE
+            if (cla != GlobalPlatform::CLA_ISO7816 || ins != GlobalPlatform::INS_GET_RESPONSE) {
+                qDebug() << "KeycardChannel::transmit(): More data available (SW1=0x61, SW2=" 
+                         << QString("0x%1").arg(sw2, 2, 16, QChar('0'))
+                         << "), sending GET RESPONSE";
+                
+                // Build GET RESPONSE command: [CLA=0x00, INS=0xC0, P1=0x00, P2=0x00, Le=SW2]
+                QByteArray getResponse;
+                getResponse.append(static_cast<char>(GlobalPlatform::CLA_ISO7816));    // CLA
+                getResponse.append(static_cast<char>(GlobalPlatform::INS_GET_RESPONSE)); // INS
+                getResponse.append(static_cast<char>(0x00));                            // P1
+                getResponse.append(static_cast<char>(0x00));                            // P2
+                getResponse.append(static_cast<char>(sw2));                             // Le (expected length)
+                
+                // Recursively call transmit to get remaining data
+                // This handles chained responses (multiple 0x61 status codes) automatically
+                return transmit(getResponse);
+            }
+        }
+    }
+    
+    return response;
 }
 
 bool KeycardChannel::isConnected() const

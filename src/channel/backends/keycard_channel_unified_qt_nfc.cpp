@@ -8,7 +8,15 @@
 #include <QTimer>
 #include <QEventLoop>
 
+#ifdef Q_OS_ANDROID
+#include <QJniObject>
+#include <QJniEnvironment>
+#endif
+
 namespace Keycard {
+
+// Android NFC timeout extension is now handled via platform/android_nfc_utils.h
+// and called from CommandSet before long operations like GlobalPlatform factory reset
 
 KeycardChannelUnifiedQtNfc::KeycardChannelUnifiedQtNfc(QObject* parent)
     : KeycardChannelBackend(parent)
@@ -37,6 +45,7 @@ KeycardChannelUnifiedQtNfc::~KeycardChannelUnifiedQtNfc()
 
 void KeycardChannelUnifiedQtNfc::startDetection()
 {
+    qDebug() << "KeycardChannelUnifiedQtNfc::startDetection()";
     if (!m_manager->isSupported(QNearFieldTarget::TagTypeSpecificAccess)) {
         updateChannelState(ChannelOperationalState::NotSupported);
         emit readerAvailabilityChanged(false);
@@ -87,6 +96,7 @@ void KeycardChannelUnifiedQtNfc::setState(ChannelState state)
 
 void KeycardChannelUnifiedQtNfc::disconnect()
 {
+    qDebug() << "KeycardChannelUnifiedQtNfc::disconnect()";
     if (m_target) {
         m_target->disconnect();
         m_target->deleteLater();
@@ -104,7 +114,7 @@ void KeycardChannelUnifiedQtNfc::forceScan()
 
 bool KeycardChannelUnifiedQtNfc::isConnected() const
 {
-    return m_detectionActive && m_target != nullptr;
+    return m_target != nullptr;
 }
 
 void KeycardChannelUnifiedQtNfc::onTargetDetected(QNearFieldTarget* target)
@@ -121,6 +131,10 @@ void KeycardChannelUnifiedQtNfc::onTargetDetected(QNearFieldTarget* target)
     }
         
     m_target = target;
+    
+    // Note: On Android, NFC timeout is extended to 10 seconds by StatusQtActivity
+    // when the NFC tag is detected, to support long GlobalPlatform operations
+    
     setupTargetSignals(target);
     emit targetDetected(newUidHex);
     updateChannelState(ChannelOperationalState::Reading);
@@ -128,6 +142,7 @@ void KeycardChannelUnifiedQtNfc::onTargetDetected(QNearFieldTarget* target)
 
 void KeycardChannelUnifiedQtNfc::onTargetLost(QNearFieldTarget* target)
 {
+    qDebug() << "KeycardChannelUnifiedQtNfc::onTargetLost() called with target:" << target;
     if (m_target != target) {
         if (target) {
             target->deleteLater();
@@ -174,10 +189,12 @@ void KeycardChannelUnifiedQtNfc::setupTargetSignals(QNearFieldTarget* target)
 {
     connect(target, &QNearFieldTarget::requestCompleted,
             this, [this](const QNearFieldTarget::RequestId& id) {
+        qDebug() << "KeycardChannelUnifiedQtNfc::requestCompleted() called with id:" << id.isValid();
         if (!m_target) {
+            qWarning() << "KeycardChannelUnifiedQtNfc::requestCompleted() called with null target";
             return;
         }
-        
+        qDebug() << "KeycardChannelUnifiedQtNfc::requestCompleted() called with target:" << m_target;
         // Find pending request by ID
         for (PendingRequest* req : m_pendingRequests) {
             if (req->requestId == id) {
@@ -214,6 +231,8 @@ void KeycardChannelUnifiedQtNfc::setupTargetSignals(QNearFieldTarget* target)
 QByteArray KeycardChannelUnifiedQtNfc::transmit(const QByteArray& apdu)
 {
     QMutexLocker locker(&m_transmitMutex);
+
+    qDebug() << "KeycardChannelUnifiedQtNfc::transmit() called with apdu:" << apdu.toHex();
     
     // Update state to Reading when actively transmitting
     updateChannelState(ChannelOperationalState::Reading);
@@ -226,21 +245,44 @@ QByteArray KeycardChannelUnifiedQtNfc::transmit(const QByteArray& apdu)
         return error;
     }
 
+    // Create event loop and pending request structure
+    QEventLoop eventLoop;
+    PendingRequest* pending = new PendingRequest;
+    pending->eventLoop = &eventLoop;
+    pending->completed = false;
+    
     // Send command (marshal to main thread if needed)
+    // CRITICAL: Must register pending request IMMEDIATELY after getting requestId
+    // to prevent race where response arrives before we start waiting
     QNearFieldTarget::RequestId requestId;
     QNearFieldTarget* target = m_target; // Capture locally
     
     if (QThread::currentThread() == target->thread()) {
+        // Same thread: send and register immediately (no gap for race condition)
         requestId = target->sendCommand(apdu);
+        pending->requestId = requestId;
+        m_pendingRequests.append(pending);
     } else {
+        // Cross-thread: send command and get ID synchronously
         QMetaObject::invokeMethod(this, [target, apdu, &requestId]() {
             requestId = target->sendCommand(apdu);
         }, Qt::BlockingQueuedConnection);
+        
+        // Register immediately after getting ID (still in transmit() call)
+        pending->requestId = requestId;
+        m_pendingRequests.append(pending);
     }
+
+    // QThread::sleep(1);
     
     // If sendCommand failed, the tag might be stale (Android)
     if (!requestId.isValid()) {
         qWarning() << "KeycardChannelUnifiedQtNfc: sendCommand failed - tag may be stale";
+        
+        // Remove the pending request we just added
+        m_pendingRequests.removeOne(pending);
+        delete pending;
+        
         QByteArray error;
         error.append(static_cast<char>(0x6F)); // SW1
         error.append(static_cast<char>(0x03)); // SW2: Invalid request ID
@@ -248,17 +290,9 @@ QByteArray KeycardChannelUnifiedQtNfc::transmit(const QByteArray& apdu)
         return error;
     }
     
-    // Wait for response
-    QEventLoop eventLoop;
-    PendingRequest* pending = new PendingRequest;
-    pending->requestId = requestId;
-    pending->eventLoop = &eventLoop;
-    pending->completed = false;
-    m_pendingRequests.append(pending);
-    
     QTimer timeout;
     timeout.setSingleShot(true);
-    timeout.setInterval(5000); // 5s timeout
+    timeout.setInterval(120000); // 120s timeout
     connect(&timeout, &QTimer::timeout, &eventLoop, &QEventLoop::quit);
     timeout.start();
     
@@ -276,6 +310,7 @@ QByteArray KeycardChannelUnifiedQtNfc::transmit(const QByteArray& apdu)
     }
     
     if (!foundReq || !foundReq->completed) {
+        qWarning() << "KeycardChannelUnifiedQtNfc: Timeout or stale tag detected " << (foundReq ? "found" : "not found") << "| completed:" << (foundReq ? foundReq->completed : false);
         if (foundReq) {
             delete foundReq;
         }

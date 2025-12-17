@@ -166,8 +166,19 @@ ApplicationInfo parseApplicationInfo(const QByteArray& data) {
         qDebug() << "ApplicationInfo: Key UID:" << value.toHex();
     }
     
-    // Capabilities (0x8D) - if not present, assume all
-    // Note: We're not implementing this fully yet
+    // Capabilities (0x8D) - if not present, assume all capabilities are supported
+    if (findTagN(data, 0, TAG_APPLICATION_INFO_TEMPLATE, TAG_CAPABILITIES, value)) {
+        if (!value.isEmpty()) {
+            info.capabilities = static_cast<uint8_t>(value[0]);
+            qDebug() << "ApplicationInfo: Capabilities:" << QString::number(info.capabilities, 16);
+        } else {
+            info.capabilities = static_cast<uint8_t>(Capability::All);
+        }
+    } else {
+        // No capabilities tag present - assume all capabilities (for older cards)
+        info.capabilities = static_cast<uint8_t>(Capability::All);
+        qDebug() << "ApplicationInfo: No capabilities tag, assuming all capabilities";
+    }
 
     return info;
 }

@@ -42,6 +42,12 @@ set(KEYCARD_QT_SOURCES
     # Crypto
     src/crypto/secure_channel.cpp
     
+    # GlobalPlatform
+    src/globalplatform/gp_crypto.cpp
+    src/globalplatform/scp02_session.cpp
+    src/globalplatform/scp02_wrapper.cpp
+    src/globalplatform/gp_command_set.cpp
+    
     # Types
     src/types/application_info.cpp
     src/types/application_status.cpp
@@ -51,6 +57,12 @@ set(KEYCARD_QT_SOURCES
     
     # Command Set
     src/command_set.cpp
+    
+    # Communication Manager (queue-based architecture)
+    src/card_command.cpp
+    src/communication_manager.cpp
+    src/tlv_utils.cpp
+    src/metadata_utils.cpp
 )
 
 # Public headers
@@ -63,8 +75,19 @@ set(KEYCARD_QT_HEADERS
     include/keycard-qt/apdu/command.h
     include/keycard-qt/apdu/response.h
     include/keycard-qt/apdu/utils.h
+    # GlobalPlatform
+    include/keycard-qt/globalplatform/gp_constants.h
+    include/keycard-qt/globalplatform/gp_crypto.h
+    include/keycard-qt/globalplatform/scp02_session.h
+    include/keycard-qt/globalplatform/scp02_wrapper.h
+    include/keycard-qt/globalplatform/gp_command_set.h
     # Backend interface
     include/keycard-qt/backends/keycard_channel_backend.h
+    # Communication Manager (queue-based architecture)
+    include/keycard-qt/card_command.h
+    include/keycard-qt/communication_manager.h
+    include/keycard-qt/tlv_utils.h
+    include/keycard-qt/metadata_utils.h
 )
 
 

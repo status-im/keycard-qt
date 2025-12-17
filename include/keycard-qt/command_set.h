@@ -404,6 +404,21 @@ private:
      * @return true if card detected, false on timeout
      */
     bool waitForCardInternal(int timeoutMs);
+    
+    /**
+     * @brief Factory reset fallback using GlobalPlatform commands
+     * 
+     * Used for older cards that don't support the FACTORY_RESET command.
+     * This method:
+     * 1. Selects the ISD (Issuer Security Domain)
+     * 2. Opens SCP02 secure channel
+     * 3. Deletes the Keycard applet instance
+     * 4. Reinstalls the Keycard applet
+     * 
+     * @param retry If true, will retry once on failure
+     * @return true if successful, false otherwise
+     */
+    bool factoryResetFallback(bool retry);
 
     
     std::shared_ptr<Keycard::KeycardChannel> m_channel;
