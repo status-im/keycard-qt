@@ -39,3 +39,5 @@ QByteArray encodeLength(quint32 length);
 
 } // namespace TLV
 } // namespace Keycard
+
+

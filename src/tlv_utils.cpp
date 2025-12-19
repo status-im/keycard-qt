@@ -107,3 +107,5 @@ QByteArray encode(uint8_t tag, const QByteArray& value) {
 
 } // namespace TLV
 } // namespace Keycard
+
+

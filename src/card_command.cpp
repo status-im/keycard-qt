@@ -230,4 +230,48 @@ CommandResult StoreMetadataCommand::execute(CommandSet* cmdSet) {
     return CommandResult::fromSuccess();
 }
 
+CommandResult SignCommand::execute(CommandSet* cmdSet) {
+    qDebug() << "SignCommand::execute() path:" << m_path << "dataSize:" << m_data.size();
+    
+    QByteArray result;
+    
+    if (m_path.isEmpty()) {
+        // Sign with current key - returns just signature (65 bytes)
+        result = cmdSet->sign(m_data);
+    } else {
+        // Sign with specific path - get full TLV response for recovery ID calculation
+        // This includes both the public key (tag 0x80) and DER signature (tag 0x30)
+        result = cmdSet->signWithPathFullResponse(m_data, m_path, m_makeCurrent);
+    }
+    
+    if (result.isEmpty()) {
+        return CommandResult::fromError(cmdSet->lastError());
+    }
+    
+    QVariantMap map;
+    
+    if (m_path.isEmpty()) {
+        // Simple signature (65 bytes: R + S + V)
+        map["signature"] = result;
+        map["signatureHex"] = result.toHex();
+    } else {
+        // Full TLV response - SignFlow will parse it for public key + signature
+        map["tlvResponse"] = result;
+        map["tlvResponseHex"] = result.toHex();
+    }
+    
+    qDebug() << "SignCommand: Result size:" << result.size() << "bytes";
+    return CommandResult::fromSuccess(map);
+}
+
+CommandResult ChangePairingCommand::execute(CommandSet* cmdSet) {
+    qDebug() << "ChangePairingCommand::execute()";
+    
+    bool result = cmdSet->changePairingSecret(m_newPairing);
+    if (!result) {
+        return CommandResult::fromError(cmdSet->lastError());
+    }
+    return CommandResult::fromSuccess();
+}
+
 } // namespace Keycard

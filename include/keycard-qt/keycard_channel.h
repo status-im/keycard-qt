@@ -131,19 +131,6 @@ public:
     KeycardChannelBackend* backend() const { return m_backend; }
     
     /**
-     * @brief Request card at app startup for initialization
-     * 
-     * iOS: Proactively shows NFC drawer and waits for first card tap.
-     * This initializes the app with card metadata. After this, card
-     * stays "connected" for subsequent operations (persistent card model).
-     * 
-     * Android/PC/SC: No-op (card detection already running in background).
-     * 
-     * @return true if card was detected, false on timeout/error
-     */
-    bool requestCardAtStartup();
-    
-    /**
      * @brief Set the channel state for lifecycle management
      * @param state The desired channel state
      * 

@@ -932,6 +932,24 @@ QByteArray CommandSet::exportKeyExtended(bool derive, bool makeCurrent, const QS
     return resp.data();
 }
 
+void CommandSet::factoryResetCleanup()
+{
+    // Remove pairing from storage (card is now in factory state)
+    if (m_pairingStorage && !m_appInfo.instanceUID.isEmpty()) {
+        qDebug() << "CommandSet::factoryReset(): Removing pairing from storage";
+        m_pairingStorage->remove(m_appInfo.instanceUID.toHex());
+    }
+    // Clean up local state after successful factory reset
+    m_secureChannel->reset();
+    m_appInfo = ApplicationInfo();
+    m_pairingInfo = PairingInfo();
+    m_cardInstanceUID.clear();
+    m_wasAuthenticated = false;
+    m_cachedPIN.clear();
+    m_cachedStatus = Keycard::ApplicationStatus();
+    select(true);
+}
+
 bool CommandSet::factoryReset()
 {
     qDebug() << "CommandSet::factoryReset()";
@@ -973,80 +991,47 @@ bool CommandSet::factoryReset()
     // If supported, try the FACTORY_RESET command first
     // If not supported or if it fails, fall back to GlobalPlatform
     
-    bool tryNativeFactoryReset = appInfo.hasFactoryResetCapability();
-    qDebug() << "CommandSet::factoryReset(): Card has factory reset capability:" << tryNativeFactoryReset;
+
+    // STEP 3: Card supports factory reset - try to execute it
+    qDebug() << "CommandSet::factoryReset(): Executing native factory reset command...";
+    APDU::Command cmd = buildCommand(APDU::INS_FACTORY_RESET, APDU::P1FactoryResetMagic, APDU::P2FactoryResetMagic);
+    APDU::Response resp = send(cmd, false);
     
-    if (tryNativeFactoryReset) {
-        // STEP 3: Card supports factory reset - try to execute it
-        qDebug() << "CommandSet::factoryReset(): Executing native factory reset command...";
-        APDU::Command cmd = buildCommand(APDU::INS_FACTORY_RESET, APDU::P1FactoryResetMagic, APDU::P2FactoryResetMagic);
-        APDU::Response resp = send(cmd, false);
+    if (checkOK(resp)) {
+        // Native factory reset succeeded
+        qDebug() << "CommandSet::factoryReset(): Native factory reset successful!";
+        factoryResetCleanup();
+        return true;
+    }
+
+    if (!appInfo.hasFactoryResetCapability()) {
+        // STEP 4: Use GlobalPlatform fallback
+        // Either card doesn't support native factory reset, or the command failed
+        qDebug() << "CommandSet::factoryReset(): Using GlobalPlatform fallback...";
+    
+        bool fallbackResult = factoryResetFallback();
         
-        if (checkOK(resp)) {
-            // Native factory reset succeeded
-            qDebug() << "CommandSet::factoryReset(): Native factory reset successful!";
-            
-            // Clean up local state after successful factory reset
-            m_secureChannel->reset();
-            m_appInfo = ApplicationInfo();
-            m_pairingInfo = PairingInfo();
-            m_cardInstanceUID.clear();
-            m_wasAuthenticated = false;
-            m_cachedPIN.clear();
-            m_cachedStatus = Keycard::ApplicationStatus();
-            m_channel->forceScan();
-            
-            // Remove pairing from storage (card is now in factory state)
-            if (m_pairingStorage && !appInfo.instanceUID.isEmpty()) {
-                qDebug() << "CommandSet::factoryReset(): Removing pairing from storage";
-                m_pairingStorage->remove(appInfo.instanceUID.toHex());
-            }
+        // Even if fallback reports failure (timeout/error), verify if card is actually reset
+        // This handles Android NFC timeouts where the reset might succeed but we lose connection
+        if (fallbackResult) {
+            factoryResetCleanup();
             return true;
         }
-        
-        // Native factory reset failed - log and fall through to GlobalPlatform
-        qDebug() << "CommandSet::factoryReset(): Native factory reset failed (SW=" 
-                 << QString("0x%1").arg(resp.sw(), 4, 16, QChar('0')) << ")";
     }
-    
-    // STEP 4: Use GlobalPlatform fallback
-    // Either card doesn't support native factory reset, or the command failed
-    qDebug() << "CommandSet::factoryReset(): Using GlobalPlatform fallback...";
-    
-    bool fallbackResult = factoryResetFallback(true);  // Allow retry
-    
-    // Even if fallback reports failure (timeout/error), verify if card is actually reset
-    // This handles Android NFC timeouts where the reset might succeed but we lose connection
-    if (!fallbackResult) {
-        qDebug() << "CommandSet::factoryReset(): Fallback reported failure, verifying card state...";
-        try {
-            ApplicationInfo verifyInfo = select();
-            if (verifyInfo.installed && !verifyInfo.initialized) {
-                qDebug() << "CommandSet::factoryReset(): SUCCESS! Card is in factory state despite error";
-                // Clean up state
-                m_secureChannel->reset();
-                m_appInfo = ApplicationInfo();
-                m_pairingInfo = PairingInfo();
-                m_cardInstanceUID.clear();
-                m_wasAuthenticated = false;
-                m_cachedPIN.clear();
-                m_cachedStatus = Keycard::ApplicationStatus();
-                if (m_pairingStorage && !verifyInfo.instanceUID.isEmpty()) {
-                    m_pairingStorage->remove(verifyInfo.instanceUID.toHex());
-                }
-                return true;
-            }
-        } catch (...) {
-            qDebug() << "CommandSet::factoryReset(): Could not verify card state after fallback failure";
-        }
+
+    bool fallbackResult = factoryResetFallback();
+
+    if (fallbackResult) {
+        factoryResetCleanup();
+        return true;
     }
     
     return fallbackResult;
 }
 
-bool CommandSet::factoryResetFallback(bool retry)
+bool CommandSet::factoryResetFallback()
 {
-    qDebug() << "CommandSet::factoryResetFallback() - Using GlobalPlatform commands (retry=" << retry << ")";
+    qDebug() << "CommandSet::factoryResetFallback() - Using GlobalPlatform commands";
     
     // Note: Android extended NFC timeout (10s) is enabled continuously in StatusQtActivity
     // This allows GlobalPlatform operations to complete without timeout
@@ -1104,12 +1089,6 @@ bool CommandSet::factoryResetFallback(bool retry)
         m_lastError = QString("GlobalPlatform DELETE failed: %1").arg(gpCmd.lastError());
         qWarning() << m_lastError;
         
-        // On delete failure, retry once if allowed
-        if (retry) {
-            qDebug() << "CommandSet::factoryResetFallback(): Delete failed, retrying factory reset...";
-            return factoryReset();  // Retry the full factory reset flow
-        }
-        
         return false;
     }
     
@@ -1122,20 +1101,6 @@ bool CommandSet::factoryResetFallback(bool retry)
     }
     
     qDebug() << "CommandSet::factoryResetFallback(): Factory reset via GlobalPlatform successful!";
-    
-    // Clean up local state after successful factory reset
-    m_secureChannel->reset();
-    m_appInfo = ApplicationInfo();
-    m_pairingInfo = PairingInfo();
-    m_cardInstanceUID.clear();
-    m_cachedStatus = Keycard::ApplicationStatus();
-    m_channel->forceScan();
-    
-    // Remove pairing from storage (card is now in factory state)
-    if (m_pairingStorage && !m_cardInstanceUID.isEmpty()) {
-        qDebug() << "CommandSet::factoryResetFallback(): Removing pairing from storage";
-        m_pairingStorage->remove(m_cardInstanceUID);
-    }
     
     return true;
 }
@@ -1459,7 +1424,7 @@ APDU::Response CommandSet::send(const APDU::Command& cmd, bool secure)
         catch (const std::runtime_error& e) {
             qWarning() << "CommandSet::send(): Failed to send via secure channel:" << e.what();
             // Return error response
-            throw new std::runtime_error(e.what());
+            throw std::runtime_error(e.what());
         }
     } else {
     // 3. Send directly via channel (no secure channel)
@@ -1470,7 +1435,7 @@ APDU::Response CommandSet::send(const APDU::Command& cmd, bool secure)
         }
         catch (const std::runtime_error& e) {
             qWarning() << "CommandSet::send(): Failed to send directly:" << e.what();
-            throw new std::runtime_error(e.what());
+            throw std::runtime_error(e.what());
         }
     }
 }
@@ -1518,13 +1483,7 @@ void CommandSet::onTargetDetected(const QString& uid) {
         qDebug() << "CommandSet: Same card re-detected";
         resetSecureChannel();  // Preserves pairing and auth state
     }
-    
-    // CRITICAL: Don't call select() here - it blocks the main thread!
-    // CommunicationManager will call select() on its own thread when it processes cardReady
-    qDebug() << "CommandSet: Card detected, notifying CommunicationManager";
-    
-    // Notify that card is detected
-    // CommunicationManager will handle initialization (SELECT, etc.) on its own thread
+    m_cardReady.store(true);
     emit cardReady(uid);
 }
 
@@ -1532,16 +1491,10 @@ void CommandSet::onTargetLost() {
     qDebug() << "CommandSet::onTargetLost"
              << "(thread:" << QThread::currentThreadId() << ")";
     
-    QString previousUID = m_targetId;
-    m_targetId.clear();
-    
-    // Reset secure channel state
-    // This ensures next detection starts fresh
     resetSecureChannel();
-    
+    m_cardReady.store(false);
     // Notify card loss only if we had a card before
-    if (!previousUID.isEmpty()) {
-        qDebug() << "CommandSet: Emitting cardLost for" << previousUID;
+    if (!m_targetId.isEmpty()) {
         emit cardLost();
     }
 }

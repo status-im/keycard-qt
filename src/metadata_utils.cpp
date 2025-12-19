@@ -128,3 +128,5 @@ QByteArray encode(const QString& name, const QStringList& paths, QString& errorM
 
 } // namespace MetadataEncoding
 } // namespace Keycard
+
+

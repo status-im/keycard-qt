@@ -179,17 +179,14 @@ QUuid CommunicationManager::enqueueCommand(std::unique_ptr<CardCommand> cmd) {
         m_queue.push(std::move(cmd));
         m_queueNotEmpty.wakeAll();
     }
-    
-    // Set channel to WaitingForCard when commands are enqueued
-    // This triggers card detection/presentation:
-    // - iOS: Opens NFC drawer for user to present card
-    // - Android/Desktop: Continues polling (already active)
-    startDetection();
-    
-    // Trigger queue processing on communication thread
-    // If card is not ready yet, processQueue will wait for cardReady signal
-    QMetaObject::invokeMethod(this, &CommunicationManager::processQueue,
-                               Qt::QueuedConnection);
+
+    if (m_commandSet && m_commandSet->isCardReady() && state() == State::Ready) {
+        QMetaObject::invokeMethod(this, &CommunicationManager::processQueue,
+                                Qt::QueuedConnection);
+    }
+    else {
+        startDetection();
+    }
     
     return token;
 }
@@ -293,12 +290,18 @@ CommunicationManager::State CommunicationManager::state() const {
 
 ApplicationInfo CommunicationManager::applicationInfo() const {
     QMutexLocker locker(&m_infoMutex);
-    return m_appInfo;
+    if (m_commandSet) {
+        return m_commandSet->applicationInfo();
+    }
+    return ApplicationInfo();
 }
 
 ApplicationStatus CommunicationManager::applicationStatus() const {
     QMutexLocker locker(&m_infoMutex);
-    return m_appStatus;
+    if (m_commandSet) {
+        return m_commandSet->cachedApplicationStatus();
+    }
+    return ApplicationStatus();
 }
 
 QByteArray CommunicationManager::getDataFromCard(uint8_t type) {
@@ -340,22 +343,6 @@ void CommunicationManager::onCardReady(const QString& uid) {
     qDebug() << "   Thread:" << QThread::currentThread();
     qDebug() << "   Current state:" << m_state;
     qDebug() << "========================================";
-    qDebug() << "   CommandSet has already:";
-    qDebug() << "   - Reset secure channel (if re-detection)";
-    qDebug() << "   - Executed SELECT applet";
-    qDebug() << "========================================";
-    
-    // Check if we're already processing this card
-    if (m_currentCardUID == uid && m_state != State::Idle) {
-        qDebug() << "CommunicationManager: Same card already being processed, ignoring";
-        return;
-    }
-    
-    // Check if we should process this card
-    if (m_state != State::Idle) {
-        qDebug() << "CommunicationManager: Card ready but not in Idle state, ignoring";
-        return;
-    }
     
     m_currentCardUID = uid;
     setState(State::Initializing);
@@ -367,9 +354,9 @@ void CommunicationManager::onCardReady(const QString& uid) {
     // =========================================================================
     
     qDebug() << "CommunicationManager: Starting card initialization sequence...";
-    CardInitializationResult result = initializeCardSequence();
-    
-    if (result.success) {
+    try {
+        CardInitializationResult result = initializeCardSequence();
+
         qDebug() << "CommunicationManager: Card initialization SUCCESS";
         
         // Update cached info
@@ -384,13 +371,12 @@ void CommunicationManager::onCardReady(const QString& uid) {
         
         // Now process any queued commands
         processQueue();
-        
-    } else {
-        qWarning() << "CommunicationManager: Card initialization FAILED:" << result.error;
-        
-        setState(State::Idle);
-        // initialization failed. Retry detection
+    } catch (const std::runtime_error& e) {
+        qWarning() << "CommunicationManager: Card initialization sequence threw exception:" << e.what();
         startDetection();
+        return;
+    } catch (...) {
+        qWarning() << "CommunicationManager: Card initialization sequence threw unknown exception";
     }
 }
 
@@ -400,11 +386,22 @@ void CommunicationManager::onCardLost() {
     qDebug() << "   Thread:" << QThread::currentThread();
     qDebug() << "========================================";
     
-    // Clear cached info
+    State currentState;
     {
-        QMutexLocker locker(&m_infoMutex);
-        m_appInfo = ApplicationInfo();
-        m_appStatus = ApplicationStatus();
+        QMutexLocker stateLocker(&m_stateMutex);
+        currentState = m_state;
+    }
+
+    if (currentState == State::Initializing) {
+        qDebug() << "CommunicationManager: Card lost during initialization, ignoring";
+        startDetection();
+        return;
+    }
+
+    if (currentState == State::Processing) {
+        qDebug() << "CommunicationManager: Card lost during command processing, ignoring";
+        startDetection();
+        return;
     }
     
     setState(State::Idle);
@@ -587,7 +584,7 @@ void CommunicationManager::processQueue() {
     CommandResult result;
     try {
         result = cmd->execute(m_commandSet.get());
-    } catch (const std::exception& e) {
+    } catch (const std::runtime_error& e) {
         qWarning() << "CommunicationManager: Command threw exception:" << e.what();
         // Re-queue at front
         m_queue.push(std::move(cmd));

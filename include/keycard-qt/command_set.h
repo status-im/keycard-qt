@@ -406,12 +406,12 @@ public:
      * @return Card UID or empty string if no card
      */
     QString currentCardUID() const { return m_targetId; }
-    
+
     /**
-     * @brief Check if card is currently connected
-     * @return true if card is connected and ready
+     * @brief Check if card is ready for commands
+     * @return true if card is ready for commands
      */
-    bool isCardConnected() const { return !m_targetId.isEmpty(); }
+    bool isCardReady() const { return m_cardReady.load(); }
     
 signals:
     /**
@@ -500,6 +500,11 @@ private:
      * @return true if card detected, false on timeout
      */
     bool waitForCardInternal(int timeoutMs);
+
+    /**
+     * @brief Clean up state after factory reset
+     */
+    void factoryResetCleanup();
     
     /**
      * @brief Factory reset fallback using GlobalPlatform commands
@@ -511,10 +516,11 @@ private:
      * 3. Deletes the Keycard applet instance
      * 4. Reinstalls the Keycard applet
      * 
-     * @param retry If true, will retry once on failure
      * @return true if successful, false otherwise
      */
-    bool factoryResetFallback(bool retry);
+    bool factoryResetFallback();
+
+    void setCardReady(bool ready);
 
     
     std::shared_ptr<Keycard::KeycardChannel> m_channel;
@@ -539,6 +545,8 @@ private:
     
     // Default timeout for waitForCard operations (can be configured for tests)
     int m_defaultWaitTimeout = 60000;  // 60 seconds default
+
+    std::atomic_bool m_cardReady = false;
 };
 
 } // namespace Keycard

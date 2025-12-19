@@ -218,4 +218,25 @@ private:
     QStringList m_paths;
 };
 
+class SignCommand : public CardCommand {
+public:
+    SignCommand(const QByteArray& data, const QString& path = QString(), bool makeCurrent = false)
+        : m_data(data), m_path(path), m_makeCurrent(makeCurrent) {}
+    CommandResult execute(CommandSet* cmdSet) override;
+    QString name() const override { return "SIGN"; }
+private:
+    QByteArray m_data;
+    QString m_path;
+    bool m_makeCurrent;
+};
+
+class ChangePairingCommand : public CardCommand {
+public:
+    explicit ChangePairingCommand(const QString& newPairing) : m_newPairing(newPairing) {}
+    CommandResult execute(CommandSet* cmdSet) override;
+    QString name() const override { return "CHANGE_PAIRING"; }
+private:
+    QString m_newPairing;
+};
+
 } // namespace Keycard

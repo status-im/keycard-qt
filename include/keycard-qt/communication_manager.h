@@ -183,6 +183,8 @@ public:
      * @return true on success
      */
     bool storeDataToCard(uint8_t type, const QByteArray& data);
+
+    std::shared_ptr<CommandSet> commandSet() const { return m_commandSet; }
     
 signals:
     /**

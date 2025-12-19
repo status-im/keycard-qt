@@ -162,20 +162,6 @@ public:
      * controlled by the channel implementation based on its operations.
      */
     virtual ChannelOperationalState channelState() const { return ChannelOperationalState::Idle; }
-    
-    /**
-     * @brief Request card at flow startup (iOS-specific)
-     * @return true if successful or not applicable, false on error
-     * 
-     * This method is primarily for iOS NFC, where the NFC session must be
-     * explicitly started (showing the system drawer) before card detection.
-     * 
-     * - iOS: Starts NFC session, shows drawer
-     * - Android/PC/SC: No-op (detection already running)
-     * 
-     * Default implementation returns true (no action needed).
-     */
-    virtual bool requestCardAtStartup() { return true; }
 
     /**
      * @brief Force immediate re-scan for cards

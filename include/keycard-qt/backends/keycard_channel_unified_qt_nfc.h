@@ -45,10 +45,12 @@ private slots:
 private:
     void setupTargetSignals(QNearFieldTarget* target);
     QString describe(QNearFieldTarget::Error error);
+    bool isTargetStillValid() const;  // Check if target is truly usable (not stale)
     
     // Qt NFC core
     QNearFieldManager* m_manager;
     QNearFieldTarget* m_target;
+    bool m_targetIsStale = false;  // Track if Android tag has been invalidated
     
     // State management
     ChannelState m_state = ChannelState::Idle;
