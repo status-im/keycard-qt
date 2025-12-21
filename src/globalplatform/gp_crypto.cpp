@@ -361,6 +361,10 @@ QByteArray Crypto::macFull3DES(const QByteArray& key, const QByteArray& data, co
         OSSL_PROVIDER* legacy = OSSL_PROVIDER_load(nullptr, "legacy");
         OSSL_PROVIDER* deflt = OSSL_PROVIDER_load(nullptr, "default");
         
+        qDebug() << "GP Crypto: macFull3DES - Legacy provider loaded:" << (legacy != nullptr);
+        qDebug() << "GP Crypto: macFull3DES - Default provider loaded:" << (deflt != nullptr);
+        
+        
         // Single DES CBC for intermediate blocks
         EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
         if (!ctx) {
@@ -370,12 +374,30 @@ QByteArray Crypto::macFull3DES(const QByteArray& key, const QByteArray& data, co
             return QByteArray(8, 0x00);
         }
         
-        if (EVP_EncryptInit_ex(ctx, EVP_des_cbc(), nullptr,
+        const EVP_CIPHER* cipher = EVP_des_cbc();
+        if (!cipher) {
+            EVP_CIPHER_CTX_free(ctx);
+            if (legacy) OSSL_PROVIDER_unload(legacy);
+            if (deflt) OSSL_PROVIDER_unload(deflt);
+            qWarning() << "GP Crypto: EVP_des_cbc() returned NULL - DES not available";
+            return QByteArray(8, 0x00);
+        }
+        
+        if (EVP_EncryptInit_ex(ctx, cipher, nullptr,
                                (const unsigned char*)singleDESKey.constData(),
                                (const unsigned char*)currentIV.constData()) != 1) {
             EVP_CIPHER_CTX_free(ctx);
             if (legacy) OSSL_PROVIDER_unload(legacy);
             if (deflt) OSSL_PROVIDER_unload(deflt);
+            
+            // Log OpenSSL errors
+            unsigned long err;
+            while ((err = ERR_get_error()) != 0) {
+                char errBuf[256];
+                ERR_error_string_n(err, errBuf, sizeof(errBuf));
+                qWarning() << "GP Crypto: OpenSSL error:" << errBuf;
+            }
+            
             qWarning() << "GP Crypto: Single DES init failed";
             return QByteArray(8, 0x00);
         }
@@ -430,21 +452,41 @@ QByteArray Crypto::encryptICV(const QByteArray& macKey, const QByteArray& icv)
         return QByteArray(8, 0x00);
     }
     
-    // Use first 8 bytes of MAC key for single DES
     QByteArray singleDESKey = macKey.left(8);
-    QByteArray nullIV = NULL_BYTES_8();
     
-    // Create single DES cipher
+    static bool providerLoadAttempted = false;
+    if (!providerLoadAttempted) {
+        OSSL_PROVIDER *legacy = OSSL_PROVIDER_load(nullptr, "legacy");
+        OSSL_PROVIDER *deflt = OSSL_PROVIDER_load(nullptr, "default");
+        if (legacy && deflt) {
+            qDebug() << "GP Crypto: OpenSSL providers loaded (legacy+default)";
+        } else if (!legacy && !deflt) {
+            qDebug() << "GP Crypto: No providers loaded - assuming static build with built-in algorithms";
+        } else {
+            qWarning() << "GP Crypto: Partial provider load (legacy:" << (legacy != nullptr) 
+                       << "default:" << (deflt != nullptr) << ")";
+        }
+        providerLoadAttempted = true;
+        // Don't unload - keep them for the lifetime of the app
+    }
+    
     EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
     if (!ctx) {
         qWarning() << "GP Crypto: Failed to create cipher context for ICV encryption";
         return QByteArray(8, 0x00);
     }
     
-    if (EVP_EncryptInit_ex(ctx, EVP_des_cbc(), nullptr,
+    // Use EVP_des_cbc() with null IV
+    const EVP_CIPHER* cipher = EVP_des_cbc();
+    QByteArray nullIV = NULL_BYTES_8();
+    
+    if (EVP_EncryptInit_ex(ctx, cipher, nullptr,
                            reinterpret_cast<const unsigned char*>(singleDESKey.constData()),
                            reinterpret_cast<const unsigned char*>(nullIV.constData())) != 1) {
-        qWarning() << "GP Crypto: ICV encryption init failed";
+        unsigned long err = ERR_get_error();
+        char errBuf[256];
+        ERR_error_string_n(err, errBuf, sizeof(errBuf));
+        qWarning() << "GP Crypto: ICV encryption init failed - OpenSSL error:" << errBuf;
         EVP_CIPHER_CTX_free(ctx);
         return QByteArray(8, 0x00);
     }

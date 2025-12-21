@@ -52,12 +52,13 @@ constexpr uint8_t TAG_GET_STATUS_AID = 0x4F;
 // Keycard AIDs (from keycard-go identifiers)
 // Package AID: A0 00 00 08 04 00 01 (7 bytes)
 inline QByteArray PACKAGE_AID() {
-    return QByteArray::fromHex("A000000804000001");
+    return QByteArray::fromHex("A0000008040001");  // FIXED: 7 bytes (was 8)
 }
 
 // Keycard Applet AID: A0 00 00 08 04 00 01 01 (8 bytes)
+// A000000804000101
 inline QByteArray KEYCARD_AID() {
-    return QByteArray::fromHex("A00000080400010101");
+    return QByteArray::fromHex("A000000804000101");  // Fixed: was 9 bytes, now correct 8 bytes
 }
 
 // Default instance index
@@ -65,9 +66,15 @@ constexpr int DEFAULT_INSTANCE_INDEX = 1;
 
 // Keycard Instance AID: A0 00 00 08 04 00 01 01 [index] (9 bytes)
 inline QByteArray KEYCARD_INSTANCE_AID(int instance = DEFAULT_INSTANCE_INDEX) {
-    QByteArray aid = QByteArray::fromHex("A00000080400010101");
-    aid.append(static_cast<char>(instance));
+    QByteArray aid = QByteArray::fromHex("A000000804000101");  // Fixed: 8 bytes base
+    aid.append(static_cast<char>(instance));  // + 1 byte instance = 9 bytes total
     return aid;
+}
+
+// ISD (Issuer Security Domain / Card Manager) AID
+// Standard GlobalPlatform ISD AID used by most cards
+inline QByteArray ISD_AID() {
+    return QByteArray::fromHex("A000000151000000");  // 8 bytes - standard GP Card Manager
 }
 
 // Default keys (from keycard-go identifiers)

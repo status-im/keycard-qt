@@ -18,13 +18,13 @@ GlobalPlatformCommandSet::GlobalPlatformCommandSet(IChannel* channel)
 bool GlobalPlatformCommandSet::select(const QByteArray& aid)
 {
     qDebug() << "GPCommandSet::select()" << (aid.isEmpty() ? "ISD" : aid.toHex());
+    QByteArray aidToSend = aid.isEmpty() ? ISD_AID() : aid;
     
     // Build SELECT command
     APDU::Command cmd(CLA_ISO7816, INS_SELECT, 0x04, 0x00);
-    if (!aid.isEmpty()) {
-        cmd.setData(aid);
-    }
-    cmd.setLe(0);  // Expect response
+    
+    cmd.setData(aidToSend);  // Use explicit ISD AID (8 bytes) or provided AID
+    cmd.setLe(0);            // Expected response length (0 = 256 bytes max)
     
     APDU::Response resp = send(cmd);
     
@@ -81,7 +81,10 @@ bool GlobalPlatformCommandSet::openSecureChannel()
         qDebug() << "GPCommandSet: Session established with" << keySet.first << "keys";
         
         // Create wrapper for secure commands (needed for EXTERNAL AUTHENTICATE)
-        m_wrapper = std::make_unique<SCP02Wrapper>(m_session->sessionKeys().macKey());
+        // Per SCP02 spec: ICV encryption uses ENC key, MAC calculation uses MAC key
+        m_wrapper = std::make_unique<SCP02Wrapper>(
+            m_session->sessionKeys().encKey(),
+            m_session->sessionKeys().macKey());
         
         // Calculate host cryptogram
         QByteArray hostCryptogram = calculateHostCryptogram(*m_session);
@@ -257,11 +260,19 @@ APDU::Response GlobalPlatformCommandSet::sendSecure(const APDU::Command& cmd)
         return APDU::Response(QByteArray::fromHex("6985"));
     }
     
+    // Log unwrapped command
+    QByteArray unwrapped = cmd.serialize();
+    
     // Wrap command with MAC
     APDU::Command wrappedCmd = m_wrapper->wrap(cmd);
     
+    // Log wrapped command
+    QByteArray wrapped = wrappedCmd.serialize();
+    
     // Send through channel
-    return send(wrappedCmd);
+    APDU::Response resp = send(wrappedCmd);
+    
+    return resp;
 }
 
 APDU::Response GlobalPlatformCommandSet::send(const APDU::Command& cmd)

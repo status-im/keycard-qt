@@ -54,6 +54,7 @@ public:
     QByteArray data() const { return m_data; }
     bool hasLe() const { return m_hasLe; }
     uint8_t le() const { return m_le; }
+    bool hasData() const { return m_hasData; }
     
 private:
     uint8_t m_cla;
@@ -61,6 +62,7 @@ private:
     uint8_t m_p1;
     uint8_t m_p2;
     QByteArray m_data;
+    bool m_hasData;
     bool m_hasLe;
     uint8_t m_le;
 };

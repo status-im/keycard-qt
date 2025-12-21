@@ -20,10 +20,11 @@ namespace GlobalPlatform {
 class SCP02Wrapper {
 public:
     /**
-     * @brief Create a new wrapper with the session MAC key
-     * @param macKey 16-byte MAC key from session
+     * @brief Create a new wrapper with the session ENC and MAC keys
+     * @param encKey 16-byte encryption key from session (for ICV encryption)
+     * @param macKey 16-byte MAC key from session (for MAC calculation)
      */
-    explicit SCP02Wrapper(const QByteArray& macKey);
+    SCP02Wrapper(const QByteArray& encKey, const QByteArray& macKey);
     
     /**
      * @brief Wrap a command with MAC
@@ -47,7 +48,8 @@ public:
     void reset();
     
 private:
-    QByteArray m_macKey;  // 16-byte MAC key
+    QByteArray m_encKey;  // 16-byte encryption key (for ICV encryption)
+    QByteArray m_macKey;  // 16-byte MAC key (for MAC calculation)
     QByteArray m_icv;     // 8-byte Initialization Chaining Vector (last MAC)
 };
 

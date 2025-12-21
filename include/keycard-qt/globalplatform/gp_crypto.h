@@ -86,9 +86,9 @@ public:
     static QByteArray macFull3DES(const QByteArray& key, const QByteArray& data, const QByteArray& iv);
     
     /**
-     * @brief Encrypt ICV (Initialization Chaining Vector) with single DES
+     * @brief Encrypt ICV (Initialization Chaining Vector) with single DES-CBC
      * Used for MAC chaining in SCP02
-     * @param macKey MAC key (first 8 bytes used)
+     * @param macKey MAC key (first 8 bytes used for single DES)
      * @param icv Current ICV (8 bytes)
      * @return Encrypted ICV (8 bytes)
      */

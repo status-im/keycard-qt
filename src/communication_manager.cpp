@@ -347,11 +347,6 @@ void CommunicationManager::onCardReady(const QString& uid) {
     m_currentCardUID = uid;
     setState(State::Initializing);
     
-    // =========================================================================
-    // Complete initialization: PAIR + OPEN SECURE CHANNEL + GET STATUS
-    // CommandSet has already done: resetSecureChannel() + SELECT
-    // Now we need to establish the secure channel
-    // =========================================================================
     
     qDebug() << "CommunicationManager: Starting card initialization sequence...";
     try {

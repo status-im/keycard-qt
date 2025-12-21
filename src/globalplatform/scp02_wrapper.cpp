@@ -6,10 +6,16 @@
 namespace Keycard {
 namespace GlobalPlatform {
 
-SCP02Wrapper::SCP02Wrapper(const QByteArray& macKey)
-    : m_macKey(macKey)
+SCP02Wrapper::SCP02Wrapper(const QByteArray& encKey, const QByteArray& macKey)
+    : m_encKey(encKey)
+    , m_macKey(macKey)
     , m_icv(Crypto::NULL_BYTES_8())  // Initialize with null bytes
 {
+    // NOTE: We store both keys but only macKey is actually used for ICV encryption
+    // (to match Go/Java implementation). encKey is kept for potential future use.
+    if (encKey.size() != 16) {
+        qWarning() << "SCP02Wrapper: ENC key must be 16 bytes, got" << encKey.size();
+    }
     if (macKey.size() != 16) {
         qWarning() << "SCP02Wrapper: MAC key must be 16 bytes, got" << macKey.size();
     }
@@ -48,7 +54,7 @@ APDU::Command SCP02Wrapper::wrap(const APDU::Command& cmd)
         // First command: use null bytes
         icvForMac = m_icv;
     } else {
-        // Subsequent commands: encrypt previous MAC with single DES
+        // Subsequent commands: encrypt previous MAC with single DES-CBC using MAC key
         icvForMac = Crypto::encryptICV(m_macKey, m_icv);
     }
     

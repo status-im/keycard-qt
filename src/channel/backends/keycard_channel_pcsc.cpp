@@ -90,8 +90,8 @@ void KeycardChannelPcsc::releaseContext()
 
 void KeycardChannelPcsc::setState(ChannelState state)
 {
-    if (m_state == state) {
-        return;
+    if (state == ChannelState::WaitingForCard) {
+        startDetection();
     }
     m_state = state;
 }
@@ -284,6 +284,10 @@ void KeycardChannelPcsc::startDetection()
     // Stop any existing detection
     if (m_detectionThread && m_detectionThread->isRunning()) {
         qDebug() << "KeycardChannelPcsc: Detection already running";
+        if (!m_lastDetectedUid.isEmpty()) {
+            emit targetDetected(m_lastDetectedUid);
+        }
+        emit readerAvailabilityChanged(m_lastReaderAvailable);
         return;
     }
     
