@@ -1352,7 +1352,11 @@ APDU::Response CommandSet::send(const APDU::Command& cmd, bool secure)
     qDebug() << "CommandSet::send() secure:" << secure;
         
     // 1. Ensure card is connected
-    if (!m_channel || !m_channel->isConnected()) {
+    bool channelValid = (m_channel != nullptr);
+    bool channelConnected = channelValid && m_channel->isConnected();
+    qDebug() << "CommandSet::send(): channel valid:" << channelValid << "connected:" << channelConnected;
+    
+    if (!channelValid || !channelConnected) {
         qDebug() << "CommandSet::send(): Card not connected, waiting...";
         if (!waitForCard()) {
             qWarning() << "CommandSet::send(): Failed to wait for card";
@@ -1389,8 +1393,13 @@ APDU::Response CommandSet::send(const APDU::Command& cmd, bool secure)
     } else {
     // 3. Send directly via channel (no secure channel)
         qDebug() << "CommandSet::send(): Sending directly (no secure channel)";
+        qDebug() << "CommandSet::send(): Channel valid:" << (m_channel != nullptr);
         try {
-            QByteArray rawResp = m_channel->transmit(cmd.serialize());
+            qDebug() << "CommandSet::send(): About to serialize command...";
+            QByteArray serialized = cmd.serialize();
+            qDebug() << "CommandSet::send(): Serialized APDU:" << serialized.toHex() << "calling transmit()...";
+            QByteArray rawResp = m_channel->transmit(serialized);
+            qDebug() << "CommandSet::send(): transmit() returned successfully";
             return APDU::Response(rawResp);
         }
         catch (const std::runtime_error& e) {
@@ -1422,6 +1431,10 @@ void CommandSet::stopDetection() {
         qWarning() << "CommandSet: No channel available";
         return;
     }
+    
+    // Reset secure channel when stopping detection
+    // This ensures that when detection restarts, the secure channel will be properly re-established
+    resetSecureChannel();
     
     // This runs on main thread, so it's safe to call directly
     m_channel->setState(ChannelState::Idle);

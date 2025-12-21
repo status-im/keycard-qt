@@ -35,6 +35,7 @@ CommunicationManager::CommunicationManager(QObject* parent)
     , m_commThread(nullptr)
     , m_state(State::Idle)
     , m_running(false)
+    , m_batchOperations(false)
 {
     qDebug() << "CommunicationManager: Created";
 }
@@ -128,6 +129,12 @@ void CommunicationManager::stop() {
     
     m_running = false;
     
+    // Clear batch mode
+    {
+        QMutexLocker locker(&m_batchMutex);
+        m_batchOperations = false;
+    }
+    
     // Stop card detection
     stopDetection();
     
@@ -161,6 +168,30 @@ void CommunicationManager::stop() {
     setState(State::Idle);
     
     qDebug() << "CommunicationManager: Stopped";
+}
+
+void CommunicationManager::startBatchOperations() {
+    QMutexLocker locker(&m_batchMutex);
+    if (!m_batchOperations) {
+        m_batchOperations = true;
+        qDebug() << "CommunicationManager: Batch operations mode ENABLED - channel will stay open";
+    }
+}
+
+void CommunicationManager::endBatchOperations() {
+    bool wasBatch = false;
+    {
+        QMutexLocker locker(&m_batchMutex);
+        wasBatch = m_batchOperations;
+        m_batchOperations = false;
+    }
+    
+    if (wasBatch) {
+        qDebug() << "CommunicationManager: Batch operations mode DISABLED";
+        
+        // Check if queue is empty and stop detection if needed
+        QMetaObject::invokeMethod(this, &CommunicationManager::processQueue, Qt::QueuedConnection);
+    }
 }
 
 QUuid CommunicationManager::enqueueCommand(std::unique_ptr<CardCommand> cmd) {
@@ -199,7 +230,7 @@ CommandResult CommunicationManager::executeCommandSync(std::unique_ptr<CardComma
     QUuid token = cmd->token();
     QString cmdName = cmd->name();
     
-    if (timeoutMs < 0) {
+    if (timeoutMs < cmd->timeoutMs()) {
         timeoutMs = cmd->timeoutMs();
     }
     
@@ -511,6 +542,18 @@ void CommunicationManager::processQueue() {
     }
 
     if (m_queue.empty()) {
+        // Check if we're in batch operations mode
+        bool inBatchMode = false;
+        {
+            QMutexLocker batchLocker(&m_batchMutex);
+            inBatchMode = m_batchOperations;
+        }
+        
+        if (inBatchMode) {
+            qDebug() << "Empty command queue but in batch mode - keeping channel open";
+            return;
+        }
+        
         // Only stop detection if we're NOT processing
         // Double-check state hasn't changed
         QMutexLocker stateLocker(&m_stateMutex);

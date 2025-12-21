@@ -128,6 +128,33 @@ public:
     void stop();
     
     /**
+     * @brief Start batch operations mode
+     * 
+     * Prevents the communication manager from automatically stopping card detection
+     * when the command queue becomes empty. Useful for performing multiple sequential
+     * operations without channel stop/start cycles.
+     * 
+     * Call endBatchOperations() when done to allow automatic detection management.
+     * 
+     * Example:
+     * @code
+     * m_commMgr->startBatchOperations();
+     * // Perform multiple executeCommandSync() calls
+     * // Channel stays open between commands
+     * m_commMgr->endBatchOperations();
+     * @endcode
+     */
+    void startBatchOperations();
+    
+    /**
+     * @brief End batch operations mode
+     * 
+     * Re-enables automatic card detection management. If the queue is empty,
+     * detection will be stopped.
+     */
+    void endBatchOperations();
+    
+    /**
      * @brief Enqueue command for async execution
      * @param cmd Command to execute
      * @return Token for tracking completion
@@ -322,6 +349,10 @@ private:
     
     // Running flag
     bool m_running;
+    
+    // Batch operations flag - when true, don't stop detection on empty queue
+    bool m_batchOperations;
+    QMutex m_batchMutex;
 };
 
 } // namespace Keycard

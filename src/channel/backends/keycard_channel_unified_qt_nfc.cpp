@@ -5,13 +5,6 @@
 #include <QDebug>
 #include <QThread>
 #include <QCoreApplication>
-#include <QTimer>
-#include <QEventLoop>
-
-#ifdef Q_OS_ANDROID
-#include <QJniObject>
-#include <QJniEnvironment>
-#endif
 
 namespace Keycard {
 
@@ -35,12 +28,6 @@ KeycardChannelUnifiedQtNfc::~KeycardChannelUnifiedQtNfc()
 {
     stopDetection();
     disconnect();
-    
-    // Clean up pending requests
-    for (PendingRequest* req : m_pendingRequests) {
-        delete req;
-    }
-    m_pendingRequests.clear();
 }
 
 void KeycardChannelUnifiedQtNfc::startDetection()
@@ -72,6 +59,7 @@ void KeycardChannelUnifiedQtNfc::startDetection()
 void KeycardChannelUnifiedQtNfc::stopDetection()
 {
 #ifdef Q_OS_IOS
+    QMutexLocker locker(&m_transmitMutex);
     qDebug() << "KeycardChannelUnifiedQtNfc::stopDetection()";
     if (m_detectionActive) {
         m_manager->stopTargetDetection();
@@ -101,9 +89,17 @@ void KeycardChannelUnifiedQtNfc::disconnect()
 {
     qDebug() << "KeycardChannelUnifiedQtNfc::disconnect()";
     if (m_target) {
-        m_target->disconnect();  // Disconnect signals
+        try {
+            m_target->disconnect();  // Disconnect signals - may crash due to Qt bug
+        } catch (const std::exception& e) {
+            qWarning() << "KeycardChannelUnifiedQtNfc::disconnect() - disconnect() threw exception:" << e.what();
+            // Continue cleanup anyway
+        } catch (...) {
+            qWarning() << "KeycardChannelUnifiedQtNfc::disconnect() - disconnect() threw unknown exception (Qt internal crash)";
+            // Continue cleanup anyway
+        }
+        
         m_target->deleteLater();
-        m_targetIsStale = true;  // Mark as stale before cleanup
         m_target = nullptr;
     }
 }
@@ -142,39 +138,17 @@ void KeycardChannelUnifiedQtNfc::onTargetDetected(QNearFieldTarget* target)
         disconnect();
     }       
     m_target = target;
-    m_targetIsStale = false;  // Fresh target
     
-    // Note: On Android, NFC timeout is extended to 10 seconds by StatusQtActivity
-    // when the NFC tag is detected, to support long GlobalPlatform operations
+    // Note: On Android, NFC timeout is extended to 120 seconds by StatusQtActivity
+    // when the NFC tag is detected, to support long operations
     
-    setupTargetSignals(target);
     emit targetDetected(newUidHex);
     updateChannelState(ChannelOperationalState::Reading);
 }
 
 bool KeycardChannelUnifiedQtNfc::isTargetStillValid() const
 {
-    if (!m_target) {
-        return false;
-    }
-    
-    if (m_targetIsStale) {
-        return false;
-    }
-    
-#ifdef Q_OS_ANDROID
-    // On Android, check if there are any pending JNI exceptions
-    // This can happen if Qt tried to access a stale tag
-    QJniEnvironment env;
-    if (env->ExceptionCheck()) {
-        qWarning() << "JNI exception detected - tag is likely stale";
-        env->ExceptionDescribe();
-        env->ExceptionClear();
-        return false;
-    }
-#endif
-    
-    return true;
+    return m_target != nullptr;
 }
 
 void KeycardChannelUnifiedQtNfc::onTargetLost(QNearFieldTarget* target)
@@ -182,15 +156,6 @@ void KeycardChannelUnifiedQtNfc::onTargetLost(QNearFieldTarget* target)
     qDebug() << "KeycardChannelUnifiedQtNfc::onTargetLost() called with target:" << target;
     if (m_target == target) {
         disconnect();
-    }
-    
-    // CRITICAL: Mark all pending requests as failed immediately
-    // The tag is gone, so any waiting transmit() calls should abort
-    for (PendingRequest* req : m_pendingRequests) {
-        if (req->eventLoop && !req->completed) {
-            req->completed = false;  // Mark as failed
-            req->eventLoop->quit();  // Wake up waiting thread
-        }
     }
     emit cardRemoved();
 }
@@ -227,224 +192,89 @@ QString KeycardChannelUnifiedQtNfc::describe(QNearFieldTarget::Error error)
     }
 }
 
-void KeycardChannelUnifiedQtNfc::setupTargetSignals(QNearFieldTarget* target)
-{
-    connect(target, &QNearFieldTarget::requestCompleted,
-            this, [this](const QNearFieldTarget::RequestId& id) {
-        qDebug() << "KeycardChannelUnifiedQtNfc::requestCompleted() called with id:" << id.isValid();
-        
-        // CRITICAL: Check if target is still valid before accessing it
-        if (!isTargetStillValid()) {
-            qWarning() << "KeycardChannelUnifiedQtNfc::requestCompleted() called with invalid/stale target";
-            // Mark all pending requests as failed
-            for (PendingRequest* req : m_pendingRequests) {
-                if (req->requestId == id && req->eventLoop && !req->completed) {
-                    req->completed = false;
-                    req->eventLoop->quit();
-                }
-            }
-            return;
-        }
-        qDebug() << "KeycardChannelUnifiedQtNfc::requestCompleted() called with target:" << m_target;
-        
-        // Find pending request by ID
-        for (PendingRequest* req : m_pendingRequests) {
-            if (req->requestId == id) {
-                // CRITICAL: Wrap requestResponse in try-catch
-                // Qt might crash here if Android tag is stale
-                try {
-                    QVariant result = m_target->requestResponse(id);
-                    req->response = result.toByteArray();
-                    req->completed = true;
-                    
-#ifdef Q_OS_ANDROID
-                    // Check if requestResponse triggered JNI exceptions
-                    QJniEnvironment env;
-                    if (env->ExceptionCheck()) {
-                        qWarning() << "JNI exception during requestResponse - tag became stale";
-                        env->ExceptionDescribe();
-                        env->ExceptionClear();
-                        m_targetIsStale = true;
-                        req->completed = false;
-                    }
-#endif
-                } catch (const std::exception& e) {
-                    qWarning() << "Exception getting request response:" << e.what();
-                    req->completed = false;
-                    m_targetIsStale = true;
-                } catch (...) {
-                    qWarning() << "Unknown exception getting request response";
-                    req->completed = false;
-                    m_targetIsStale = true;
-                }
-                
-                if (req->eventLoop) {
-                    req->eventLoop->quit();
-                }
-                break;
-            }
-        }
-    }, Qt::DirectConnection);
-    
-    connect(target, &QNearFieldTarget::error,
-            this, [this](QNearFieldTarget::Error error, const QNearFieldTarget::RequestId& id) {
-
-        qWarning() << "QNearFieldTarget Error: " << describe(error);
-
-        // Find pending request by ID
-        for (PendingRequest* req : m_pendingRequests) {
-            if (req->requestId == id) {
-                req->completed = false;
-                if (req->eventLoop) {
-                    req->eventLoop->quit();
-                }
-                break;
-            }
-        }
-        
-    }, Qt::DirectConnection);
-}
 
 QByteArray KeycardChannelUnifiedQtNfc::transmit(const QByteArray& apdu)
 {
-    QMutexLocker locker(&m_transmitMutex);
-
     qDebug() << "KeycardChannelUnifiedQtNfc::transmit() called with apdu:" << apdu.toHex();
+    QMutexLocker locker(&m_transmitMutex);
     
     // Update state to Reading when actively transmitting
     updateChannelState(ChannelOperationalState::Reading);
     
-    // CRITICAL: Check if target is truly valid (not just non-null)
+    // Check if target is valid
     if (!isTargetStillValid()) {
         qWarning() << "KeycardChannelUnifiedQtNfc::transmit() - target is not valid (null or stale)";
         updateChannelState(ChannelOperationalState::Error);
-        
-        // Not connected or tag is stale
         throw std::runtime_error("Target is not valid (null or stale)");
     }
-
-    // Create event loop and pending request structure
-    QEventLoop eventLoop;
-    PendingRequest* pending = new PendingRequest;
-    pending->eventLoop = &eventLoop;
-    pending->completed = false;
     
-    // Send command (marshal to main thread if needed)
-    // CRITICAL: Must register pending request IMMEDIATELY after getting requestId
-    // to prevent race where response arrives before we start waiting
-    QNearFieldTarget::RequestId requestId;
-    QNearFieldTarget* target = m_target; // Capture locally
-    
-    // CRITICAL: Check if target is valid before using it
+    QNearFieldTarget* target = m_target;
     if (!target) {
-        qWarning() << "KeycardChannelUnifiedQtNfc::transmit() - target is null, cannot send";
-        delete pending;
+        qWarning() << "KeycardChannelUnifiedQtNfc::transmit() - target is null";
         updateChannelState(ChannelOperationalState::Error);
-        throw std::runtime_error("Target is null, cannot send");
+        throw std::runtime_error("Target is null");
     }
     
-    // Wrap sendCommand in try-catch to handle Qt's internal Android JNI exceptions
-    // If the Android tag is removed, Qt's sendCommand() will throw or crash
+    QNearFieldTarget::RequestId requestId;
+    bool success = false;
+    QVariant responseVariant;
+    
+    // Single try-catch block to protect all Qt NFC operations from race condition crashes
     try {
+        // Send command (cross-thread if needed)
         if (QThread::currentThread() == target->thread()) {
-            // Same thread: send and register immediately (no gap for race condition)
             requestId = target->sendCommand(apdu);
-            pending->requestId = requestId;
-            m_pendingRequests.append(pending);
         } else {
-            // Cross-thread: send command and get ID synchronously
-            bool invokeSuccess = QMetaObject::invokeMethod(this, [target, apdu, &requestId]() {
-                requestId = target->sendCommand(apdu);
-            }, Qt::BlockingQueuedConnection);
+            bool invokeSuccess = QMetaObject::invokeMethod(this, 
+                [target, apdu, &requestId]() {
+                    requestId = target->sendCommand(apdu);
+                }, Qt::BlockingQueuedConnection);
             
             if (!invokeSuccess) {
                 qWarning() << "KeycardChannelUnifiedQtNfc::transmit() - invokeMethod failed";
-                delete pending;
                 updateChannelState(ChannelOperationalState::Error);
                 throw std::runtime_error("Failed to invoke sendCommand");
             }
-            
-            // Register immediately after getting ID (still in transmit() call)
-            pending->requestId = requestId;
-            m_pendingRequests.append(pending);
         }
+        
+        // Wait for completion with 5-second timeout
+        // Returns false if tag is lost or timeout occurs
+        success = target->waitForRequestCompleted(requestId, 5000);
+        
+        if (!success) {
+            qWarning() << "KeycardChannelUnifiedQtNfc::transmit() - request failed (tag lost or timeout)";
+            updateChannelState(ChannelOperationalState::Error);
+            // If m_target was nulled, it was tag loss not timeout
+            if (!m_target) {
+                throw std::runtime_error("Tag lost during transmission");
+            }
+            throw std::runtime_error("Transmit failed: timeout");
+        }
+        
+        // Get response
+        responseVariant = target->requestResponse(requestId);
+        if (!responseVariant.isValid()) {
+            qWarning() << "KeycardChannelUnifiedQtNfc::transmit() - invalid response from target";
+            updateChannelState(ChannelOperationalState::Error);
+            throw std::runtime_error("Invalid response from target");
+        }
+        
     } catch (const std::exception& e) {
-        qWarning() << "KeycardChannelUnifiedQtNfc::transmit() - Exception during sendCommand:" << e.what();
-        delete pending;
+        qWarning() << "KeycardChannelUnifiedQtNfc::transmit() - Qt operation threw exception:" << e.what();
         updateChannelState(ChannelOperationalState::Error);
-        throw std::runtime_error("Exception during sendCommand - tag may have been removed");
+        // Check if target became stale during the call (tag was lost)
+        throw std::runtime_error("Failed to transmit");
     } catch (...) {
-        qWarning() << "KeycardChannelUnifiedQtNfc::transmit() - Unknown exception during sendCommand";
-        delete pending;
+        qWarning() << "KeycardChannelUnifiedQtNfc::transmit() - Qt operation threw unknown exception (Qt targetCheckTimer race crash)";
         updateChannelState(ChannelOperationalState::Error);
-        throw std::runtime_error("Unknown exception during sendCommand - tag may have been removed");
-    }
-
-    // QThread::sleep(1);
-    
-#ifdef Q_OS_ANDROID
-    // Check if sendCommand triggered any JNI exceptions (tag was removed during call)
-    QJniEnvironment env;
-    if (env->ExceptionCheck()) {
-        qWarning() << "KeycardChannelUnifiedQtNfc: JNI exception after sendCommand - tag was removed";
-        env->ExceptionDescribe();
-        env->ExceptionClear();
-        
-        m_targetIsStale = true;
-        m_pendingRequests.removeOne(pending);
-        delete pending;
-        
-        updateChannelState(ChannelOperationalState::Error);
-        throw std::runtime_error("Tag was removed during sendCommand");
-    }
-#endif
-    
-    // If sendCommand failed, the tag might be stale (Android)
-    if (!requestId.isValid()) {
-        qWarning() << "KeycardChannelUnifiedQtNfc: sendCommand failed - tag may be stale";
-        
-        m_targetIsStale = true;  // Mark as stale
-        
-        // Remove the pending request we just added
-        m_pendingRequests.removeOne(pending);
-        delete pending;
-        
-        updateChannelState(ChannelOperationalState::Error);
-        throw std::runtime_error("Send command failed, tag may be stale");
-    }
-    
-    QTimer timeout;
-    timeout.setSingleShot(true);
-    timeout.setInterval(120000); // 120s timeout
-    connect(&timeout, &QTimer::timeout, &eventLoop, &QEventLoop::quit);
-    timeout.start();
-    
-    eventLoop.exec();
-    timeout.stop();
-    
-    // Find and remove the pending request
-    PendingRequest* foundReq = nullptr;
-    for (int i = 0; i < m_pendingRequests.size(); ++i) {
-        if (m_pendingRequests[i]->requestId == requestId) {
-            foundReq = m_pendingRequests[i];
-            m_pendingRequests.removeAt(i);
-            break;
+        if (!m_target) {
+            throw std::runtime_error("Tag lost during transmission (Qt race condition crash)");
         }
+        throw std::runtime_error("Transmit failed with unknown error (Qt internal crash)");
     }
     
-    if (!foundReq || !foundReq->completed) {
-        qWarning() << "KeycardChannelUnifiedQtNfc: Timeout or stale tag detected " << (foundReq ? "found" : "not found") << "| completed:" << (foundReq ? foundReq->completed : false);
-        if (foundReq) {
-            delete foundReq;
-        }
-        
-        updateChannelState(ChannelOperationalState::Error);
-        throw std::runtime_error("Timeout or stale tag detected");
-    }
-    
-    QByteArray response = foundReq->response;
-    delete foundReq;
-    
+    QByteArray response = responseVariant.toByteArray();
+    qDebug() << "KeycardChannelUnifiedQtNfc::transmit() - success, response:" << response.toHex();
     return response;
 }
 

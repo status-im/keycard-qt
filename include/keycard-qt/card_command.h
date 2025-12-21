@@ -52,7 +52,7 @@ public:
     /**
      * @brief Get timeout for this command in milliseconds
      */
-    virtual int timeoutMs() const { return 30000; }
+    virtual int timeoutMs() const { return 120000; }
     
     /**
      * @brief Can this command run during card initialization?

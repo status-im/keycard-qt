@@ -6,9 +6,7 @@
 #include "keycard_channel_backend.h"
 #include <QNearFieldManager>
 #include <QNearFieldTarget>
-#include <QList>
 #include <QMutex>
-#include <QEventLoop>
 
 namespace Keycard {
 
@@ -43,14 +41,12 @@ private slots:
     void onTargetLost(QNearFieldTarget* target);
 
 private:
-    void setupTargetSignals(QNearFieldTarget* target);
     QString describe(QNearFieldTarget::Error error);
     bool isTargetStillValid() const;  // Check if target is truly usable (not stale)
     
     // Qt NFC core
     QNearFieldManager* m_manager;
     QNearFieldTarget* m_target;
-    bool m_targetIsStale = false;  // Track if Android tag has been invalidated
     
     // State management
     ChannelState m_state = ChannelState::Idle;
@@ -62,15 +58,6 @@ private:
     
     // Thread safety
     mutable QMutex m_transmitMutex;
-    
-    // Pending APDU requests
-    struct PendingRequest {
-        QNearFieldTarget::RequestId requestId;
-        QEventLoop* eventLoop = nullptr;
-        QByteArray response;
-        bool completed = false;
-    };
-    QList<PendingRequest*> m_pendingRequests;
 };
 
 } // namespace Keycard
