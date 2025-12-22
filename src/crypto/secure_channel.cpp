@@ -298,9 +298,6 @@ APDU::Response SecureChannel::send(const APDU::Command& command)
     }
 
     APDU::Response response(rawResponse);
-    
-    uint8_t sw1 = (response.sw() >> 8) & 0xFF;
-    uint8_t sw2 = response.sw() & 0xFF;
 
     // Decrypt response if successful
     if (response.isOK() && !response.data().isEmpty()) {

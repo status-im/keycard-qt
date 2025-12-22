@@ -59,6 +59,7 @@ set(KEYCARD_QT_SOURCES
     src/command_set.cpp
     
     # Communication Manager (queue-based architecture)
+    src/i_communication_manager.cpp
     src/card_command.cpp
     src/communication_manager.cpp
     src/tlv_utils.cpp
@@ -84,6 +85,7 @@ set(KEYCARD_QT_HEADERS
     # Backend interface
     include/keycard-qt/backends/keycard_channel_backend.h
     # Communication Manager (queue-based architecture)
+    include/keycard-qt/i_communication_manager.h
     include/keycard-qt/card_command.h
     include/keycard-qt/communication_manager.h
     include/keycard-qt/tlv_utils.h

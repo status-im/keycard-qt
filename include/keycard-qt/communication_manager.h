@@ -1,5 +1,6 @@
 #pragma once
 
+#include "i_communication_manager.h"
 #include "card_command.h"
 #include "command_set.h"
 #include "keycard_channel.h"
@@ -15,35 +16,6 @@
 #include <queue>
 
 namespace Keycard {
-
-/**
- * @brief Result of card initialization sequence
- */
-struct CardInitializationResult {
-    bool success;
-    QString error;
-    QString uid;  // Card UID
-    ApplicationInfo appInfo;
-    ApplicationStatus appStatus;
-    
-    CardInitializationResult() : success(false) {}
-    
-    static CardInitializationResult fromSuccess(const QString& cardUid, const ApplicationInfo& info, const ApplicationStatus& status) {
-        CardInitializationResult result;
-        result.success = true;
-        result.uid = cardUid;
-        result.appInfo = info;
-        result.appStatus = status;
-        return result;
-    }
-    
-    static CardInitializationResult fromError(const QString& err) {
-        CardInitializationResult result;
-        result.success = false;
-        result.error = err;
-        return result;
-    }
-};
 
 /**
  * @brief Manages card communication with queue-based architecture
@@ -62,8 +34,10 @@ struct CardInitializationResult {
  * - Commands can be enqueued from any thread
  * - Execution happens on dedicated communication thread
  * - Results delivered via signals (async) or return values (sync)
+ * 
+ * Inherits from ICommunicationManager interface for testability.
  */
-class CommunicationManager : public QObject {
+class CommunicationManager : public ICommunicationManager {
     Q_OBJECT
     
 public:
@@ -108,7 +82,7 @@ public:
      * Begins monitoring for card presence. Must be called after init().
      * Can be called multiple times (e.g., to resume after stop).
      */
-    bool startDetection();
+    bool startDetection() override;
     
     /**
      * @brief Stop card detection
@@ -117,7 +91,7 @@ public:
      * Queue processing continues for enqueued commands.
      * Call startDetection() to resume monitoring.
      */
-    void stopDetection();
+    void stopDetection() override;
     
     /**
      * @brief Stop the communication manager completely
@@ -144,7 +118,7 @@ public:
      * m_commMgr->endBatchOperations();
      * @endcode
      */
-    void startBatchOperations();
+    void startBatchOperations() override;
     
     /**
      * @brief End batch operations mode
@@ -152,7 +126,7 @@ public:
      * Re-enables automatic card detection management. If the queue is empty,
      * detection will be stopped.
      */
-    void endBatchOperations();
+    void endBatchOperations() override;
     
     /**
      * @brief Enqueue command for async execution
@@ -179,7 +153,7 @@ public:
      * IMPORTANT: Do NOT call this from the communication thread or main thread
      * if the main thread needs to process events. Use from worker threads only.
      */
-    CommandResult executeCommandSync(std::unique_ptr<CardCommand> cmd, int timeoutMs = -1);
+    CommandResult executeCommandSync(std::unique_ptr<CardCommand> cmd, int timeoutMs = -1) override;
     
     /**
      * @brief Get current state
@@ -189,12 +163,12 @@ public:
     /**
      * @brief Get current card info (only valid when Ready)
      */
-    ApplicationInfo applicationInfo() const;
+    ApplicationInfo applicationInfo() const override;
     
     /**
      * @brief Get current card status (only valid when Ready)
      */
-    ApplicationStatus applicationStatus() const;
+    ApplicationStatus applicationStatus() const override;
     
     /**
      * @brief Get raw data from card (for metadata operations)
@@ -211,7 +185,7 @@ public:
      */
     bool storeDataToCard(uint8_t type, const QByteArray& data);
 
-    std::shared_ptr<CommandSet> commandSet() const { return m_commandSet; }
+    std::shared_ptr<CommandSet> commandSet() const override { return m_commandSet; }
     
 signals:
     /**
@@ -221,21 +195,8 @@ signals:
      */
     void commandCompleted(QUuid token, CommandResult result);
     
-    /**
-     * @brief Emitted when card initialization completes
-     * @param result Initialization result
-     */
-    void cardInitialized(CardInitializationResult result);
-    
-    /**
-     * @brief Emitted when card is lost/removed
-     */
-    void cardLost();
-    
-    /**
-     * @brief Emitted when state changes
-     * @param newState New state
-     */
+    // Note: cardInitialized, cardLost, and stateChanged are inherited from ICommunicationManager
+    // but we need to keep compatible signature for State enum
     void stateChanged(State newState);
     
 private slots:

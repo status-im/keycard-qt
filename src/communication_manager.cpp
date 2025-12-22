@@ -31,7 +31,7 @@ void CommunicationManager::CommunicationThread::run() {
 // ============================================================================
 
 CommunicationManager::CommunicationManager(QObject* parent)
-    : QObject(parent)
+    : ICommunicationManager(parent)
     , m_commThread(nullptr)
     , m_state(State::Idle)
     , m_running(false)
