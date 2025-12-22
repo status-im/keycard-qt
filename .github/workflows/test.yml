@@ -28,13 +28,6 @@ jobs:
             qt_target: desktop
             cmake_generator: "Unix Makefiles"
             
-          # macOS builds  
-          - os: macos-13
-            name: macOS (Intel)
-            qt_arch: clang_64
-            qt_target: desktop
-            cmake_generator: "Unix Makefiles"
-            
           - os: macos-14
             name: macOS (ARM64)
             qt_arch: clang_64
