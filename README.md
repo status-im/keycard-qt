@@ -6,10 +6,12 @@ Cross-platform C++/Qt library for Keycard APDU API - a 1:1 replacement for [keyc
 
 ## Features
 
+- **Thread-safe API**: `CommunicationManager` provides queue-based, thread-safe card operations
 - **Cross-platform**: Linux, macOS, Windows (PC/SC), Android, iOS (NFC)
-- **Unified API**: Single codebase with automatic backend selection (PC/SC for desktop, Qt NFC for mobile)
+- **Unified backend**: Single codebase with automatic backend selection (PC/SC for desktop, Qt NFC for mobile)
 - **Complete APDU support**: All Keycard commands implemented
 - **Secure channel**: ECDH key exchange + AES-CBC encryption
+- **Async & Sync**: Both signal-based and blocking APIs available
 - **Backend architecture**: Clean separation with pluggable backends for testing and extension
 
 ## Supported Platforms
@@ -73,49 +75,92 @@ This builds the native library `libkeycard-qt.so` with Qt NFC support for Androi
 
 ## Quick Start
 
+### Using CommunicationManager (Recommended - Thread-Safe)
+
+```cpp
+#include <keycard-qt/communication_manager.h>
+#include <keycard-qt/command_set.h>
+#include <keycard-qt/keycard_channel.h>
+#include <keycard-qt/pairing_storage.h>
+
+using namespace Keycard;
+
+// 1. Create communication stack
+auto channel = std::make_shared<KeycardChannel>();
+auto pairingStorage = std::make_shared<FilePairingStorage>();
+auto passwordProvider = [](const QString& cardUID) {
+    return "KeycardDefaultPairing";
+};
+auto cmdSet = std::make_shared<CommandSet>(channel, pairingStorage, passwordProvider);
+
+// 2. Create CommunicationManager (thread-safe API)
+auto commManager = std::make_shared<CommunicationManager>();
+commManager->init(cmdSet);
+
+// 3. Connect signals
+connect(commManager.get(), &CommunicationManager::cardInitialized,
+        [](CardInitializationResult result) {
+    if (result.success) {
+        qDebug() << "Card ready! UID:" << result.uid;
+        qDebug() << "Version:" << result.appInfo.version;
+    }
+});
+
+// 4. Start detection
+commManager->startDetection();
+
+// 5. Execute commands synchronously (thread-safe)
+auto selectCmd = std::make_unique<SelectCommand>();
+CommandResult result = commManager->executeCommandSync(std::move(selectCmd), 5000);
+
+// 6. Or asynchronously
+auto verifyCmd = std::make_unique<VerifyPINCommand>("123456");
+QUuid token = commManager->enqueueCommand(std::move(verifyCmd));
+connect(commManager.get(), &CommunicationManager::commandCompleted,
+        [token](QUuid completedToken, CommandResult result) {
+    if (completedToken == token && result.success) {
+        qDebug() << "PIN verified!";
+    }
+});
+```
+
+### Direct API (For Simple Use Cases)
+
 ```cpp
 #include <keycard-qt/keycard_channel.h>
 #include <keycard-qt/command_set.h>
 
 // Create channel (works on all platforms!)
-auto channel = new KeycardChannel();
-
-// Start detection
-channel->startDetection();
+auto channel = std::make_shared<KeycardChannel>();
+auto cmdSet = std::make_shared<CommandSet>(channel, nullptr, nullptr);
 
 // Connect signals
-connect(channel, &KeycardChannel::targetDetected, [](const QString& uid) {
+connect(channel.get(), &KeycardChannel::targetDetected, 
+        [cmdSet](const QString& uid) {
     qDebug() << "Keycard detected:" << uid;
+    
+    // Select and use
+    auto appInfo = cmdSet->select();
+    cmdSet->verifyPIN("123456");
 });
 
-// Use command set
-auto cmdSet = new CommandSet(channel);
-
-// Select keycard applet
-auto appInfo = cmdSet->select();
-qDebug() << "Instance UID:" << appInfo.instanceUID;
-
-// Pair with keycard
-auto pairingInfo = cmdSet->pair("KeycardDefaultPairing");
-
-// Open secure channel
-cmdSet->openSecureChannel(pairingInfo.index, pairingInfo.key);
-
-// Verify PIN
-cmdSet->verifyPIN("123456");
-
-// Export keys
-auto keys = cmdSet->exportKeyExtended(true, false, 
-                                      P2ExportKeyPrivateAndPublic, 
-                                      "m/44'/60'/0'/0/0");
+channel->startDetection();
 ```
 
 ## Architecture
 
 ```
 ┌─────────────────────────────────────┐
+│ CommunicationManager                │
+│ • Thread-safe queue-based API       │
+│ • Async (signal) + Sync (blocking)  │
+│ • Single communication thread       │
+└──────────────┬──────────────────────┘
+               │
+┌──────────────▼──────────────────────┐
 │ CommandSet                          │
 │ • High-level keycard operations     │
+│ • Pairing & secure channel mgmt     │
 └──────────────┬──────────────────────┘
                │
 ┌──────────────▼──────────────────────┐
@@ -143,8 +188,9 @@ auto keys = cmdSet->exportKeyExtended(true, false,
 
 ## Documentation
 
-- [API Reference](docs/API.md)
-- [Qt NFC Integration](https://doc.qt.io/qt-6/qtnfc-pcsc.html)
+- [API Reference](docs/API.md) - Complete API documentation
+- [Examples Guide](EXAMPLES_GUIDE.md) - Detailed guide for all examples
+- [Qt NFC Integration](https://doc.qt.io/qt-6/qtnfc-pcsc.html) - Qt NFC documentation
 
 ## Testing
 

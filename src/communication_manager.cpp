@@ -127,34 +127,19 @@ void CommunicationManager::stop() {
     
     qDebug() << "CommunicationManager: Stopping completely...";
     
+    // Step 1: Prevent new commands from being accepted
     m_running = false;
     
-    // Clear batch mode
+    // Step 2: Clear batch mode
     {
         QMutexLocker locker(&m_batchMutex);
         m_batchOperations = false;
     }
     
-    // Stop card detection
+    // Step 3: Stop card detection
     stopDetection();
     
-    // Clear queue
-    {
-        QMutexLocker locker(&m_queueMutex);
-        // std::queue doesn't have clear(), use swap with empty queue
-        std::queue<std::unique_ptr<CardCommand>>().swap(m_queue);
-        m_queueNotEmpty.wakeAll();
-    }
-    
-    // Stop thread
-    if (m_commThread) {
-        m_commThread->quit();
-        m_commThread->wait(5000);
-        delete m_commThread;
-        m_commThread = nullptr;
-    }
-    
-    // Clear sync operations
+    // Step 4: Wake up all pending sync operations and mark them as stopped
     {
         QMutexLocker locker(&m_syncMutex);
         for (auto it = m_pendingSync.begin(); it != m_pendingSync.end(); ++it) {
@@ -162,8 +147,68 @@ void CommunicationManager::stop() {
             it.value()->result = CommandResult::fromError("CommunicationManager stopped");
             it.value()->condition.wakeAll();
         }
+    }
+    
+    // Step 5: Wait for all pending sync operations to actually complete
+    // Give threads time to wake up and exit their wait loops
+    qDebug() << "CommunicationManager: Waiting for pending sync operations to complete...";
+    const int maxWaitIterations = 100;  // 100 * 10ms = 1 second max
+    int pendingCount = 0;
+    for (int i = 0; i < maxWaitIterations; ++i) {
+        {
+            QMutexLocker locker(&m_syncMutex);
+            pendingCount = m_pendingSync.size();
+            if (pendingCount == 0) {
+                qDebug() << "CommunicationManager: All sync operations completed";
+                break;
+            }
+        }
+        QThread::msleep(10);
+    }
+    
+    if (pendingCount > 0) {
+        qWarning() << "CommunicationManager: Still" << pendingCount << "pending sync operations after wait";
+    }
+    
+    // Step 6: Clear the queue and wake any threads waiting on it
+    {
+        QMutexLocker locker(&m_queueMutex);
+        std::queue<std::unique_ptr<CardCommand>>().swap(m_queue);
+        m_queueNotEmpty.wakeAll();
+    }
+    
+    // Step 7: Stop the communication thread
+    // Note: We check m_running before posting processQueue() events (see executeCommand)
+    // This prevents new events from being posted after stop() begins
+    if (m_commThread) {
+        // CRITICAL: Remove all pending QueuedConnection events for this object
+        // After waking sync threads, processQueue() events may still be in the event queue
+        // We must clear them BEFORE calling quit() to prevent use-after-free
+        QCoreApplication::removePostedEvents(this);
+        
+        qDebug() << "CommunicationManager: Stopping communication thread...";
+        m_commThread->quit();
+        
+        // Wait for thread to finish with a reasonable timeout
+        if (!m_commThread->wait(5000)) {
+            qWarning() << "CommunicationManager: Thread did not stop gracefully, forcing termination";
+            m_commThread->terminate();
+            m_commThread->wait(1000);
+        }
+        
+        delete m_commThread;
+        m_commThread = nullptr;
+        qDebug() << "CommunicationManager: Communication thread stopped";
+    }
+    
+    // Step 8: Final cleanup of any remaining sync operations
+    {
+        QMutexLocker locker(&m_syncMutex);
         m_pendingSync.clear();
     }
+    
+    // Step 9: Give one final moment for any last cleanup
+    QThread::msleep(50);
     
     setState(State::Idle);
     
@@ -200,6 +245,11 @@ QUuid CommunicationManager::enqueueCommand(std::unique_ptr<CardCommand> cmd) {
         return QUuid();
     }
     
+    if (!cmd) {
+        qWarning() << "CommunicationManager: Cannot enqueue null command";
+        return QUuid();
+    }
+    
     QUuid token = cmd->token();
     QString cmdName = cmd->name();
     
@@ -227,16 +277,20 @@ CommandResult CommunicationManager::executeCommandSync(std::unique_ptr<CardComma
         return CommandResult::fromError("CommunicationManager not running");
     }
     
+    if (!cmd) {
+        qWarning() << "CommunicationManager: Cannot execute null command";
+        return CommandResult::fromError("Null command");
+    }
+    
     QUuid token = cmd->token();
     QString cmdName = cmd->name();
     
-    if (timeoutMs < cmd->timeoutMs()) {
+    if (timeoutMs < 0) {
         timeoutMs = cmd->timeoutMs();
     }
     
-    qDebug() << "CommunicationManager: Executing command synchronously:" << cmdName
-             << "token:" << token << "timeout:" << timeoutMs
-             << "thread:" << QThread::currentThread();
+    // Note: Reduced logging here to avoid qDebug race conditions with multiple threads
+    qDebug() << "CommunicationManager: Executing command synchronously:" << cmdName << "timeout:" << timeoutMs;
     
     // Create sync tracker on HEAP to prevent dangling pointer
     // Use shared_ptr so it stays valid even after this function returns
@@ -654,8 +708,11 @@ void CommunicationManager::processQueue() {
     
     // Process next command if any
     // If queue is empty, processQueue() will handle stopDetection()
-    QMetaObject::invokeMethod(this, &CommunicationManager::processQueue,
-                               Qt::QueuedConnection);
+    // Only post event if still running (don't post events during shutdown)
+    if (m_running) {
+        QMetaObject::invokeMethod(this, &CommunicationManager::processQueue,
+                                   Qt::QueuedConnection);
+    }
 }
 
 } // namespace Keycard

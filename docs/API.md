@@ -7,8 +7,9 @@ Complete API documentation for keycard-qt library.
 - [Overview](#overview)
 - [Architecture](#architecture)
 - [Core Classes](#core-classes)
-  - [KeycardChannel](#keycardchannel)
+  - [CommunicationManager](#communicationmanager) ⭐
   - [CommandSet](#commandset)
+  - [KeycardChannel](#keycardchannel)
   - [SecureChannel](#securechannel)
 - [Backend System](#backend-system)
   - [KeycardChannelBackend](#keycardchannelbackend)
@@ -34,12 +35,27 @@ Complete API documentation for keycard-qt library.
 
 keycard-qt provides a complete C++/Qt implementation of the Keycard APDU API. The library uses a layered architecture:
 
-1. **CommandSet** - High-level keycard operations (pairing, signing, key management)
-2. **SecureChannel** - ECDH key exchange + AES-CBC encryption
-3. **KeycardChannel** - Platform-adaptive communication layer
-4. **Backend** - Platform-specific implementations (PC/SC for desktop, Qt NFC for mobile)
+1. **CommunicationManager** - Thread-safe, queue-based API for all card operations (✨ **Recommended**)
+2. **CommandSet** - High-level keycard operations (pairing, signing, key management)
+3. **SecureChannel** - ECDH key exchange + AES-CBC encryption
+4. **KeycardChannel** - Platform-adaptive communication layer
+5. **Backend** - Platform-specific implementations (PC/SC for desktop, Qt NFC for mobile)
 
 All classes are in the `Keycard` namespace.
+
+### Which API Should I Use?
+
+- **Use `CommunicationManager`** (recommended) for:
+  - Production applications
+  - Multi-threaded environments
+  - When you need both async and sync APIs
+  - Stable, reliable card communication
+
+- **Use `CommandSet` directly** for:
+  - Simple single-threaded tools
+  - Testing and debugging
+  - Quick prototypes
+  - Maximum control over the communication flow
 
 ---
 
@@ -47,6 +63,14 @@ All classes are in the `Keycard` namespace.
 
 ```
 ┌─────────────────────────────────────┐
+│ CommunicationManager                │
+│ • Thread-safe queue-based API       │
+│ • Async (signal) + Sync (blocking)  │
+│ • Single communication thread       │
+│ • Command queue serialization       │
+└──────────────┬──────────────────────┘
+               │
+┌──────────────▼──────────────────────┐
 │ CommandSet                          │
 │ • High-level keycard operations     │
 │ • Automatic pairing management      │
@@ -82,6 +106,239 @@ All classes are in the `Keycard` namespace.
 ---
 
 ## Core Classes
+
+### CommunicationManager
+
+**Header:** `keycard-qt/communication_manager.h`
+
+Thread-safe, queue-based API for managing card communication. This is the **recommended** entry point for production applications. All card operations are serialized through a dedicated communication thread, preventing race conditions and ensuring reliable operation.
+
+#### Architecture
+
+`CommunicationManager` uses a queue-based architecture:
+- Single dedicated communication thread
+- Command queue for serialized execution
+- Both async (signal-based) and sync (blocking) APIs
+- Automatic card detection and initialization
+- Thread-safe from any thread
+
+#### Constructor
+
+```cpp
+explicit CommunicationManager(QObject* parent = nullptr);
+```
+
+#### Initialization
+
+```cpp
+// Initialize with CommandSet
+void init(std::shared_ptr<CommandSet> commandSet);
+
+// Start card detection
+void startDetection();
+
+// Stop card detection (but keep communication thread alive)
+void stopDetection();
+
+// Stop everything (cleanup)
+void stop();
+```
+
+#### Asynchronous API (Signal-Based)
+
+```cpp
+// Enqueue a command for async execution
+QUuid enqueueCommand(std::unique_ptr<CardCommand> cmd);
+
+// Signal: Command completed
+void commandCompleted(QUuid token, CommandResult result);
+```
+
+**Example:**
+```cpp
+auto cmd = std::make_unique<SelectCommand>();
+QUuid token = commManager->enqueueCommand(std::move(cmd));
+
+connect(commManager.get(), &CommunicationManager::commandCompleted,
+        [token](QUuid completedToken, CommandResult result) {
+    if (completedToken == token) {
+        if (result.success) {
+            qDebug() << "Command succeeded!";
+        } else {
+            qWarning() << "Command failed:" << result.error;
+        }
+    }
+});
+```
+
+#### Synchronous API (Blocking)
+
+```cpp
+// Execute command synchronously (blocks until complete)
+CommandResult executeCommandSync(std::unique_ptr<CardCommand> cmd, 
+                                  int timeoutMs = -1);
+```
+
+**Example:**
+```cpp
+auto cmd = std::make_unique<VerifyPINCommand>("123456");
+CommandResult result = commManager->executeCommandSync(std::move(cmd), 5000);
+
+if (result.success) {
+    qDebug() << "PIN verified!";
+} else {
+    qWarning() << "Error:" << result.error;
+}
+```
+
+#### Card Lifecycle Signals
+
+```cpp
+// Card detected and initialized
+void cardInitialized(CardInitializationResult result);
+
+// Card removed
+void cardLost();
+
+// State changed
+void stateChanged(CommunicationManager::State newState);
+```
+
+#### States
+
+```cpp
+enum class State {
+    Idle,                  // Not running
+    DetectingCard,         // Waiting for card
+    InitializingCard,      // Initializing card
+    CardReady,             // Card ready for operations
+    ExecutingCommand,      // Executing command
+    Error                  // Error state
+};
+```
+
+#### Data Types
+
+**`CardInitializationResult`:**
+```cpp
+struct CardInitializationResult {
+    bool success;                      // Initialization succeeded?
+    QString error;                     // Error message (if failed)
+    QString uid;                       // Card UID
+    ApplicationInfo appInfo;           // Application info
+    ApplicationStatus appStatus;       // Application status
+};
+```
+
+**`CommandResult`:**
+```cpp
+struct CommandResult {
+    bool success;           // Command succeeded?
+    QString error;          // Error message (if failed)
+    QVariant data;          // Command-specific result data
+    QByteArray rawResponse; // Raw APDU response
+};
+```
+
+#### Available Commands
+
+All commands inherit from `CardCommand` base class. Available commands:
+
+**Basic Commands:**
+- `SelectCommand` - Select Keycard applet
+- `VerifyPINCommand` - Verify PIN
+- `ChangePINCommand` - Change PIN
+- `ChangePUKCommand` - Change PUK
+- `UnblockPINCommand` - Unblock PIN with PUK
+
+**Key Management:**
+- `InitCommand` - Initialize new card
+- `GenerateKeyCommand` - Generate key pair
+- `LoadSeedCommand` - Load BIP39 seed
+- `DeriveKeyCommand` - Derive key at path
+- `RemoveKeyCommand` - Remove key
+- `ExportKeyCommand` - Export public key
+- `GenerateMnemonicCommand` - Generate BIP39 mnemonic
+
+**Signing:**
+- `SignCommand` - Sign with current key
+- `SignWithPathCommand` - Sign with key at path
+- `SetPinlessPathCommand` - Set path for pinless signing
+
+**Other:**
+- `PairCommand` - Pair with card
+- `UnpairCommand` - Unpair slot
+- `GetStatusCommand` - Get application status
+- `FactoryResetCommand` - Factory reset (⚠️ ERASES ALL DATA)
+- `StoreDataCommand` - Store data on card
+- `GetDataCommand` - Get data from card
+
+#### Complete Example
+
+```cpp
+#include <keycard-qt/communication_manager.h>
+#include <keycard-qt/command_set.h>
+#include <keycard-qt/keycard_channel.h>
+#include <keycard-qt/pairing_storage.h>
+
+using namespace Keycard;
+
+// 1. Create communication stack
+auto channel = std::make_shared<KeycardChannel>();
+auto pairingStorage = std::make_shared<FilePairingStorage>();
+auto passwordProvider = [](const QString& cardUID) {
+    return "KeycardDefaultPairing";
+};
+auto cmdSet = std::make_shared<CommandSet>(channel, pairingStorage, passwordProvider);
+
+// 2. Create CommunicationManager
+auto commManager = std::make_shared<CommunicationManager>();
+commManager->init(cmdSet);
+
+// 3. Connect signals
+connect(commManager.get(), &CommunicationManager::cardInitialized,
+        [commManager](CardInitializationResult result) {
+    if (result.success) {
+        qDebug() << "Card ready! UID:" << result.uid;
+        
+        // Execute operations
+        auto cmd = std::make_unique<VerifyPINCommand>("123456");
+        CommandResult result = commManager->executeCommandSync(std::move(cmd));
+        
+        if (result.success) {
+            qDebug() << "PIN verified!";
+        }
+    }
+});
+
+connect(commManager.get(), &CommunicationManager::cardLost, []() {
+    qDebug() << "Card removed";
+});
+
+// 4. Start detection
+commManager->startDetection();
+```
+
+#### Thread Safety Notes
+
+- `CommunicationManager` is **fully thread-safe**
+- Can call `enqueueCommand()` and `executeCommandSync()` from any thread
+- Signals are emitted from the communication thread (use `Qt::QueuedConnection` for cross-thread slots)
+- All card I/O happens on a single dedicated thread (prevents race conditions)
+
+#### Lifecycle Management
+
+```cpp
+// Typical lifecycle:
+commManager->init(cmdSet);           // 1. Initialize
+commManager->startDetection();       // 2. Start detection
+// ... use card ...
+commManager->stopDetection();        // 3. Stop detection (keep thread alive)
+// ... can restart detection later ...
+commManager->stop();                 // 4. Full cleanup (destructor calls this too)
+```
+
+---
 
 ### KeycardChannel
 
@@ -863,23 +1120,52 @@ if (!response.isOK()) {
 
 ## Threading Model
 
-### Main Thread Usage
+### Using CommunicationManager (Recommended - Thread-Safe)
+
+`CommunicationManager` is **fully thread-safe** and handles all threading complexity for you:
+
+```cpp
+// ✅ Recommended: Thread-safe from any thread
+auto commManager = std::make_shared<CommunicationManager>();
+commManager->init(cmdSet);
+commManager->startDetection();
+
+// Can call from any thread!
+auto cmd = std::make_unique<VerifyPINCommand>("123456");
+CommandResult result = commManager->executeCommandSync(std::move(cmd));
+
+// Or async from any thread
+QUuid token = commManager->enqueueCommand(std::move(anotherCmd));
+```
+
+**Benefits:**
+- No manual thread management needed
+- All card I/O serialized on dedicated thread
+- No race conditions
+- Both async and sync APIs available
+- Safe to call from multiple threads simultaneously
+
+### Direct API Threading (Advanced)
+
+If using `CommandSet` and `KeycardChannel` directly (not recommended for production):
+
+#### Main Thread Usage
 
 All Qt signal/slot operations must happen on the main thread:
 
 ```cpp
-// ✅ Correct: Use from main thread
+// ⚠️ Direct API: Use from main thread
 auto channel = new KeycardChannel(this);
 connect(channel, &KeycardChannel::targetDetected, this, &MyClass::onCardDetected);
 channel->startDetection();
 ```
 
-### Worker Thread Usage
+#### Worker Thread Usage
 
 For blocking operations, use worker threads:
 
 ```cpp
-// ✅ Correct: Blocking operations in worker thread
+// ⚠️ Direct API: Blocking operations in worker thread
 QThread* workerThread = new QThread;
 auto cmdSet = new CommandSet(channel, storage, provider);
 
@@ -894,11 +1180,14 @@ connect(workerThread, &QThread::started, [cmdSet]() {
 workerThread->start();
 ```
 
-### Thread Safety
+### Thread Safety Summary
 
-- **SecureChannel**: Thread-safe (uses internal mutex)
-- **KeycardChannel**: Should be used from main thread
-- **CommandSet**: Should be used from single thread (worker or main)
+| Class | Thread Safety | Notes |
+|-------|---------------|-------|
+| **CommunicationManager** | ✅ **Fully thread-safe** | Recommended for production use |
+| **CommandSet** | ⚠️ Single-threaded | Use from one thread only |
+| **SecureChannel** | ✅ Thread-safe | Uses internal mutex |
+| **KeycardChannel** | ⚠️ Main thread only | Qt signal/slot constraints |
 
 ---
 
@@ -991,7 +1280,91 @@ connect(channel, &KeycardChannel::readerAvailabilityChanged,
 
 ## Examples
 
-### Basic Card Detection
+For complete, runnable examples, see the [Examples Guide](../EXAMPLES_GUIDE.md).
+
+### Using CommunicationManager (Recommended)
+
+#### Basic Card Detection and Operations
+
+```cpp
+#include <keycard-qt/communication_manager.h>
+#include <keycard-qt/command_set.h>
+#include <keycard-qt/keycard_channel.h>
+#include <keycard-qt/pairing_storage.h>
+
+using namespace Keycard;
+
+// Setup
+auto channel = std::make_shared<KeycardChannel>();
+auto pairingStorage = std::make_shared<FilePairingStorage>();
+auto passwordProvider = [](const QString& uid) { return "KeycardDefaultPairing"; };
+auto cmdSet = std::make_shared<CommandSet>(channel, pairingStorage, passwordProvider);
+
+auto commManager = std::make_shared<CommunicationManager>();
+commManager->init(cmdSet);
+
+// Connect signals
+connect(commManager.get(), &CommunicationManager::cardInitialized,
+        [](CardInitializationResult result) {
+    if (result.success) {
+        qDebug() << "Card ready! UID:" << result.uid;
+    }
+});
+
+connect(commManager.get(), &CommunicationManager::cardLost, []() {
+    qDebug() << "Card removed";
+});
+
+// Start detection
+commManager->startDetection();
+```
+
+#### Synchronous Operations
+
+```cpp
+// Verify PIN (blocks until complete, but thread-safe!)
+auto verifyCmd = std::make_unique<VerifyPINCommand>("123456");
+CommandResult result = commManager->executeCommandSync(std::move(verifyCmd), 5000);
+
+if (result.success) {
+    qDebug() << "PIN verified!";
+    
+    // Sign a transaction
+    QByteArray hash = /* 32-byte hash */;
+    auto signCmd = std::make_unique<SignCommand>(hash, "m/44'/60'/0'/0/0");
+    CommandResult signResult = commManager->executeCommandSync(std::move(signCmd), 30000);
+    
+    if (signResult.success) {
+        QByteArray signature = signResult.data.toMap()["signature"].toByteArray();
+        qDebug() << "Signature:" << signature.toHex();
+    }
+}
+```
+
+#### Asynchronous Operations
+
+```cpp
+// Enqueue multiple commands
+auto cmd1 = std::make_unique<SelectCommand>();
+auto cmd2 = std::make_unique<VerifyPINCommand>("123456");
+
+QUuid token1 = commManager->enqueueCommand(std::move(cmd1));
+QUuid token2 = commManager->enqueueCommand(std::move(cmd2));
+
+// Handle completion
+connect(commManager.get(), &CommunicationManager::commandCompleted,
+        [token1, token2](QUuid token, CommandResult result) {
+    if (token == token1) {
+        qDebug() << "Select completed:" << result.success;
+    } else if (token == token2) {
+        qDebug() << "Verify PIN completed:" << result.success;
+    }
+});
+```
+
+### Using Direct API (Advanced)
+
+#### Basic Card Detection
 
 ```cpp
 #include <keycard-qt/keycard_channel.h>
@@ -1011,7 +1384,63 @@ connect(channel, &KeycardChannel::targetLost,
 channel->startDetection();
 ```
 
-### Complete Pairing Flow
+#### Complete Key Generation and Signing Flow
+
+```cpp
+// Wait for card
+connect(commManager.get(), &CommunicationManager::cardInitialized,
+        [commManager](CardInitializationResult result) {
+    if (!result.success) {
+        qWarning() << "Card init failed:" << result.error;
+        return;
+    }
+    
+    if (!result.appInfo.initialized) {
+        // Initialize new card
+        auto initCmd = std::make_unique<InitCommand>("123456", "123456789012", "KeycardDefaultPairing");
+        CommandResult initResult = commManager->executeCommandSync(std::move(initCmd), 60000);
+        
+        if (!initResult.success) {
+            qWarning() << "Init failed:" << initResult.error;
+            return;
+        }
+        
+        qDebug() << "Card initialized!";
+    }
+    
+    // Verify PIN
+    auto verifyCmd = std::make_unique<VerifyPINCommand>("123456");
+    CommandResult verifyResult = commManager->executeCommandSync(std::move(verifyCmd));
+    
+    if (!verifyResult.success) {
+        qWarning() << "PIN verification failed:" << verifyResult.error;
+        return;
+    }
+    
+    // Generate key
+    auto genKeyCmd = std::make_unique<GenerateKeyCommand>();
+    CommandResult keyResult = commManager->executeCommandSync(std::move(genKeyCmd));
+    
+    if (keyResult.success) {
+        QByteArray keyUID = keyResult.data.toMap()["keyUID"].toByteArray();
+        qDebug() << "Key UID:" << keyUID.toHex();
+        
+        // Sign transaction
+        QByteArray txHash = /* 32-byte hash */;
+        auto signCmd = std::make_unique<SignCommand>(txHash, "m/44'/60'/0'/0/0");
+        CommandResult signResult = commManager->executeCommandSync(std::move(signCmd));
+        
+        if (signResult.success) {
+            QByteArray signature = signResult.data.toMap()["signature"].toByteArray();
+            qDebug() << "Signature:" << signature.toHex();
+        }
+    }
+});
+```
+
+### Using Direct API (Advanced)
+
+#### Complete Pairing Flow
 
 ```cpp
 #include <keycard-qt/keycard_channel.h>
@@ -1049,7 +1478,7 @@ if (cmdSet->verifyPIN("123456")) {
 }
 ```
 
-### Key Generation and Signing
+#### Key Generation and Signing
 
 ```cpp
 // Initialize new keycard
@@ -1183,6 +1612,21 @@ constexpr uint8_t P1StoreDataCash = 0x02;    // Cash data
 
 ## Best Practices
 
+### Architecture
+
+1. **Use CommunicationManager for production:**
+   ```cpp
+   // ✅ Recommended: Thread-safe, robust
+   auto commManager = std::make_shared<CommunicationManager>();
+   commManager->init(cmdSet);
+   ```
+
+2. **Direct API only for simple cases:**
+   ```cpp
+   // ⚠️ Only for: prototypes, tests, or simple single-threaded tools
+   auto cmdSet = std::make_shared<CommandSet>(channel, storage, provider);
+   ```
+
 ### Security
 
 1. **Always check remaining attempts before verifyPIN:**
@@ -1251,8 +1695,7 @@ constexpr uint8_t P1StoreDataCash = 0x02;    // Cash data
 ## See Also
 
 - [Main README](../README.md) - Project overview and build instructions
-- [iOS NFC Quick Start](IOS_QUICK_START.md) - iOS-specific NFC setup
-- [Porting Guide](PORTING_GUIDE.md) - Porting from keycard-go
+- [Examples Guide](../EXAMPLES_GUIDE.md) - Detailed examples with CommunicationManager
 - [Qt NFC Documentation](https://doc.qt.io/qt-6/qtnfc-index.html)
 - [Keycard Specification](https://keycard.tech/)
 

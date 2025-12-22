@@ -1,5 +1,5 @@
-# Qt Test framework
-find_package(Qt6 REQUIRED COMPONENTS Test)
+# Qt Test framework and Concurrent for threading tests
+find_package(Qt6 REQUIRED COMPONENTS Test Concurrent)
 
 # Enable testing
 enable_testing()
@@ -57,6 +57,32 @@ add_keycard_test(test_globalplatform_crypto)
 
 # Dependency Injection tests with mock backend
 add_keycard_test(test_keycard_channel_di mocks/mock_backend.cpp)
+
+# CommunicationManager tests (new thread-safe architecture)
+add_keycard_test(test_communication_manager mocks/mock_backend.cpp)
+add_keycard_test(test_communication_manager_queue mocks/mock_backend.cpp)
+add_keycard_test(test_communication_manager_sync mocks/mock_backend.cpp)
+
+# CardCommand pattern tests
+add_keycard_test(test_card_command mocks/mock_backend.cpp)
+
+# Threading tests (requires Qt Concurrent)
+add_executable(test_communication_manager_threading test_communication_manager_threading.cpp mocks/mock_backend.cpp)
+target_link_libraries(test_communication_manager_threading
+    PRIVATE
+        keycard-qt
+        Qt6::Test
+        Qt6::Concurrent
+)
+target_include_directories(test_communication_manager_threading
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+)
+target_compile_definitions(test_communication_manager_threading PRIVATE KEYCARD_ENABLE_TEST_HELPERS)
+add_test(NAME test_communication_manager_threading COMMAND test_communication_manager_threading)
+set_tests_properties(test_communication_manager_threading PROPERTIES
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+)
 
 message(STATUS "Unit tests configured - run with: ctest --verbose")
 

@@ -7,6 +7,14 @@
 using namespace Keycard;
 using namespace Keycard::Test;
 
+/**
+ * @brief Internal CommandSet tests
+ * 
+ * NOTE: After refactoring, CommandSet is internal to CommunicationManager.
+ * These tests validate CommandSet functionality independently but the public
+ * API is through CommunicationManager. See test_communication_manager*.cpp
+ * for tests of the public thread-safe queue-based architecture.
+ */
 class TestCommandSetNew : public QObject {
     Q_OBJECT
     
@@ -484,7 +492,11 @@ private slots:
         auto* mock = qobject_cast<MockBackend*>(channel->backend());
         CommandSet cmd(channel, nullptr, nullptr);
         
-        mock->queueResponse(QByteArray::fromHex("6985"));
+        // Queue responses for: SELECT (fail), native factory reset (fail), GP fallback attempts (all fail)
+        mock->queueResponse(QByteArray::fromHex("6985")); // SELECT fails
+        mock->queueResponse(QByteArray::fromHex("6985")); // Native factory reset fails
+        mock->queueResponse(QByteArray::fromHex("6985")); // GP SELECT ISD fails
+        mock->queueResponse(QByteArray::fromHex("6985")); // GP fallback retry fails
         
         bool result = cmd.factoryReset();
         

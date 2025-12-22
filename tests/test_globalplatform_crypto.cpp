@@ -144,9 +144,9 @@ private slots:
         QByteArray cardChallenge = QByteArray::fromHex("0807060504030201");
         
         // Calculate what the card cryptogram should be
+        // Note: mac3DES handles padding internally, don't pre-pad
         QByteArray data = hostChallenge + cardChallenge;
-        QByteArray paddedData = Crypto::appendDESPadding(data);
-        QByteArray expectedCryptogram = Crypto::mac3DES(encKey, paddedData, Crypto::NULL_BYTES_8());
+        QByteArray expectedCryptogram = Crypto::mac3DES(encKey, data, Crypto::NULL_BYTES_8());
         
         // Verify it
         bool verified = Crypto::verifyCryptogram(encKey, hostChallenge, cardChallenge, expectedCryptogram);

@@ -7,6 +7,7 @@
 #include <QByteArray>
 #include <QTimer>
 #include <QQueue>
+#include <QMutex>
 
 namespace Keycard {
 namespace Test {
@@ -165,6 +166,53 @@ public:
      */
     void reset();
 
+    // ========================================================================
+    // Threading and Performance Testing Enhancements
+    // ========================================================================
+
+    /**
+     * @brief Set artificial delay for transmit operations
+     * @param delayMs Delay in milliseconds (0 = no delay)
+     * 
+     * Useful for testing timeout handling and concurrent operations.
+     */
+    void setTransmitDelay(int delayMs) { m_transmitDelay = delayMs; }
+
+    /**
+     * @brief Get current transmit delay
+     */
+    int getTransmitDelay() const { return m_transmitDelay; }
+
+    /**
+     * @brief Set delay before card inserted signal
+     * @param delayMs Delay in milliseconds (0 = immediate)
+     */
+    void setInsertionDelay(int delayMs) { m_insertionDelay = delayMs; }
+
+    /**
+     * @brief Enable/disable thread-safe mode
+     * @param threadSafe If true, uses mutexes for all operations
+     * 
+     * When enabled, all state access is protected by mutex for testing
+     * concurrent access patterns.
+     */
+    void setThreadSafe(bool threadSafe) { m_threadSafe = threadSafe; }
+
+    /**
+     * @brief Get number of times simulateCardInserted was called
+     */
+    int getInsertionCount() const { return m_insertionCount; }
+
+    /**
+     * @brief Get number of times simulateCardRemoved was called
+     */
+    int getRemovalCount() const { return m_removalCount; }
+
+    /**
+     * @brief Get number of times error was emitted
+     */
+    int getErrorCount() const { return m_errorCount; }
+
 private:
     // State
     bool m_autoConnect;
@@ -187,6 +235,17 @@ private:
 
     // Auto-connect timer
     QTimer* m_autoConnectTimer;
+
+    // Threading enhancements
+    int m_transmitDelay = 0;
+    int m_insertionDelay = 0;
+    bool m_threadSafe = false;
+    mutable QMutex m_mutex;
+
+    // Statistics
+    int m_insertionCount = 0;
+    int m_removalCount = 0;
+    int m_errorCount = 0;
 };
 
 } // namespace Test

@@ -58,10 +58,12 @@ private slots:
         // Note: Le stores the actual value, not the encoded value
         QCOMPARE(cmd.le(), 0); // Stored as 0, encoded as 0 (means 256)
         
-        // Serialize: CLA INS P1 P2 Le
+        // Serialize: CLA INS P1 P2 Lc Le (Case 4 short with Lc=0)
+        // When only Le is set (no data), the implementation outputs Lc=0 for compatibility
         QByteArray serialized = cmd.serialize();
-        QCOMPARE(serialized.size(), 5);
-        QCOMPARE((uint8_t)serialized[4], (uint8_t)0x00); // Le=0 means 256
+        QCOMPARE(serialized.size(), 6); // CLA INS P1 P2 Lc=0 Le
+        QCOMPARE((uint8_t)serialized[4], (uint8_t)0x00); // Lc=0
+        QCOMPARE((uint8_t)serialized[5], (uint8_t)0x00); // Le=0 means 256
     }
     
     void testCommandWithDataAndLe() {

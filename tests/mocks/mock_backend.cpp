@@ -3,6 +3,9 @@
 
 #include "mock_backend.h"
 #include <QDebug>
+#include <QThread>
+#include <QMutex>
+#include <QMutexLocker>
 
 namespace Keycard {
 namespace Test {
@@ -17,6 +20,12 @@ MockBackend::MockBackend(QObject* parent)
     , m_logApdu(false)
     , m_defaultResponse(QByteArray::fromHex("9000"))  // Default success
     , m_autoConnectTimer(new QTimer(this))
+    , m_transmitDelay(0)
+    , m_insertionDelay(0)
+    , m_threadSafe(false)
+    , m_insertionCount(0)
+    , m_removalCount(0)
+    , m_errorCount(0)
 {
     m_autoConnectTimer->setSingleShot(true);
     connect(m_autoConnectTimer, &QTimer::timeout, this, [this]() {
@@ -42,11 +51,15 @@ void MockBackend::setCardUid(const QString& uid)
 
 void MockBackend::queueResponse(const QByteArray& response)
 {
+    // Thread-safe lock if enabled
+    QMutexLocker locker(m_threadSafe ? &m_mutex : nullptr);
     m_responseQueue.enqueue(response);
 }
 
 void MockBackend::clearResponses()
 {
+    // Thread-safe lock if enabled
+    QMutexLocker locker(m_threadSafe ? &m_mutex : nullptr);
     m_responseQueue.clear();
 }
 
@@ -103,6 +116,14 @@ bool MockBackend::isConnected() const
 
 QByteArray MockBackend::transmit(const QByteArray& apdu)
 {
+    // Thread-safe lock if enabled
+    QMutexLocker locker(m_threadSafe ? &m_mutex : nullptr);
+
+    // Simulate transmit delay for testing timeouts
+    if (m_transmitDelay > 0) {
+        QThread::msleep(m_transmitDelay);
+    }
+
     // Check for error simulation
     if (!m_nextThrowMessage.isEmpty()) {
         QString msg = m_nextThrowMessage;
@@ -140,30 +161,49 @@ QByteArray MockBackend::transmit(const QByteArray& apdu)
 
 void MockBackend::simulateCardInserted()
 {
+    // Thread-safe lock if enabled
+    QMutexLocker locker(m_threadSafe ? &m_mutex : nullptr);
+
     if (m_connected) {
         qWarning() << "[MockBackend] Card already inserted";
         return;
     }
 
+    // Simulate insertion delay for testing race conditions
+    if (m_insertionDelay > 0) {
+        locker.unlock();  // Release lock during delay
+        QThread::msleep(m_insertionDelay);
+        locker.relock();
+    }
+
     m_connected = true;
+    m_insertionCount++;
     qDebug() << "[MockBackend] Card inserted, UID:" << m_cardUid;
     emit targetDetected(m_cardUid);
 }
 
 void MockBackend::simulateCardRemoved()
 {
+    // Thread-safe lock if enabled
+    QMutexLocker locker(m_threadSafe ? &m_mutex : nullptr);
+
     if (!m_connected) {
         qWarning() << "[MockBackend] No card to remove";
         return;
     }
 
     m_connected = false;
+    m_removalCount++;
     qDebug() << "[MockBackend] Card removed";
     emit cardRemoved();
 }
 
 void MockBackend::simulateError(const QString& errorMessage)
 {
+    // Thread-safe lock if enabled
+    QMutexLocker locker(m_threadSafe ? &m_mutex : nullptr);
+
+    m_errorCount++;
     qDebug() << "[MockBackend] Simulating error:" << errorMessage;
     emit error(errorMessage);
 }
@@ -203,6 +243,9 @@ void MockBackend::forceScan()
 
 void MockBackend::reset()
 {
+    // Thread-safe lock if enabled
+    QMutexLocker locker(m_threadSafe ? &m_mutex : nullptr);
+
     qDebug() << "[MockBackend] Resetting state";
 
     // Stop detection
@@ -231,10 +274,18 @@ void MockBackend::reset()
     m_transmittedApdus.clear();
     m_nextThrowMessage.clear();
 
-    // Reset to defaults (but keep autoConnect if it was set)
+    // Reset statistics
+    m_insertionCount = 0;
+    m_removalCount = 0;
+    m_errorCount = 0;
+
+    // Reset to defaults (but keep autoConnect and threading settings if they were set)
     // m_autoConnect = false;  // Don't reset autoConnect
+    // m_threadSafe = false;   // Don't reset threading mode
     m_cardUid = "MOCK-CARD-UID-12345678";
     m_defaultResponse = QByteArray::fromHex("9000");
+    m_transmitDelay = 0;
+    m_insertionDelay = 0;
 }
 
 } // namespace Test

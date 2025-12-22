@@ -7,6 +7,13 @@
 using namespace Keycard;
 using namespace Keycard::Test;
 
+/**
+ * @brief Extended internal CommandSet tests
+ * 
+ * NOTE: After refactoring, CommandSet is internal to CommunicationManager.
+ * These tests provide extended coverage of CommandSet internals.
+ * For public API tests, see test_communication_manager*.cpp.
+ */
 class TestCommandSetExtended : public QObject {
     Q_OBJECT
     
