@@ -17,7 +17,7 @@ GlobalPlatformCommandSet::GlobalPlatformCommandSet(IChannel* channel)
 
 bool GlobalPlatformCommandSet::select(const QByteArray& aid)
 {
-    qDebug() << "GPCommandSet::select()" << (aid.isEmpty() ? "ISD" : aid.toHex());
+    qDebug() << "GPCommandSet::select()" << (aid.isEmpty() ? ISD_AID().toHex() : aid.toHex());
     QByteArray aidToSend = aid.isEmpty() ? ISD_AID() : aid;
     
     // Build SELECT command
