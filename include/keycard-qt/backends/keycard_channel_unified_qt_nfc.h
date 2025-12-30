@@ -6,6 +6,7 @@
 #include "keycard_channel_backend.h"
 #include <QNearFieldManager>
 #include <QNearFieldTarget>
+#include <QMetaObject>
 #include <QMutex>
 
 namespace Keycard {
@@ -38,6 +39,9 @@ public:
 private slots:
     void onTargetDetected(QNearFieldTarget* target);
     void onTargetLost(QNearFieldTarget* target);
+#ifdef Q_OS_ANDROID
+    void onAdapterStateChanged(QNearFieldManager::AdapterState state);
+#endif
 
 private:
     QString describe(QNearFieldTarget::Error error);
@@ -50,6 +54,13 @@ private:
     // State management
     ChannelState m_state = ChannelState::Idle;
     bool m_detectionActive = false;
+
+#ifdef Q_OS_ANDROID
+    // Qt NFC on Android can fail if discovery is started before the Activity/app is fully active.
+    // We defer startTargetDetection() until the app reaches Qt::ApplicationActive.
+    bool m_waitingForAppActive = false;
+    QMetaObject::Connection m_appStateConn;
+#endif
     
     // Helper to update and emit channel state
     void emitChannelState(ChannelOperationalState newState);

@@ -16,6 +16,12 @@ if(IOS OR ANDROID)
     find_package(Qt6 REQUIRED COMPONENTS Nfc)
 endif()
 
+# Android: this library may be built standalone (e.g. as a vendored dependency) and still needs
+# QtGui headers for QGuiApplication-based lifecycle gating in the NFC backend.
+if(ANDROID)
+    find_package(Qt6 REQUIRED COMPONENTS Gui)
+endif()
+
 # OpenSSL for secp256k1 ECDH
 # For Android and iOS, we use manually provided paths instead of find_package
 if((ANDROID OR IOS) AND OPENSSL_CRYPTO_LIBRARY AND OPENSSL_BUILD_INCLUDE_DIR AND OPENSSL_SOURCE_INCLUDE_DIR)
@@ -138,6 +144,10 @@ target_link_libraries(keycard-qt
 # Qt NFC for iOS, Android, and unified backend (desktop)
 if(IOS OR ANDROID)
     target_link_libraries(keycard-qt PUBLIC Qt6::Nfc)
+endif()
+
+if(ANDROID)
+    target_link_libraries(keycard-qt PRIVATE Qt6::Gui)
 endif()
 
 # Link OpenSSL (if found)

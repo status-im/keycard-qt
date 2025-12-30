@@ -4,7 +4,6 @@
 #include "keycard-qt/pairing_storage.h"
 #include "keycard-qt/globalplatform/gp_command_set.h"
 #include "keycard-qt/globalplatform/gp_constants.h"
-#include "keycard-qt/platform/android_nfc_utils.h"
 #include <QDebug>
 #include <QCryptographicHash>
 #include <QMessageAuthenticationCode>

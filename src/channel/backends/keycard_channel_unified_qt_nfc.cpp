@@ -5,11 +5,12 @@
 #include <QDebug>
 #include <QThread>
 #include <QCoreApplication>
+#ifdef Q_OS_ANDROID
+#include <QGuiApplication>
+#include <QTimer>
+#endif
 
 namespace Keycard {
-
-// Android NFC timeout extension is now handled via platform/android_nfc_utils.h
-// and called from CommandSet before long operations like GlobalPlatform factory reset
 
 KeycardChannelUnifiedQtNfc::KeycardChannelUnifiedQtNfc(QObject* parent)
     : KeycardChannelBackend(parent)
@@ -22,6 +23,15 @@ KeycardChannelUnifiedQtNfc::KeycardChannelUnifiedQtNfc(QObject* parent)
             this, &KeycardChannelUnifiedQtNfc::onTargetDetected, Qt::DirectConnection);
     connect(m_manager, &QNearFieldManager::targetLost,
             this, &KeycardChannelUnifiedQtNfc::onTargetLost, Qt::DirectConnection);
+    connect(this, &KeycardChannelUnifiedQtNfc::channelStateChanged, this, [this](ChannelOperationalState state) {
+        if (state == ChannelOperationalState::WaitingForKeycard) {
+            m_manager->setUserInformation("Waiting for keycard. Please hold the keycard near the device.");
+        } else if (state == ChannelOperationalState::Reading) {
+            m_manager->setUserInformation("Reading keycard. Please hold the keycard near the device.");
+        } else if (state == ChannelOperationalState::Error) {
+            m_manager->setUserInformation("Error reading keycard. Please try again.");
+        }
+    });
 }
 
 KeycardChannelUnifiedQtNfc::~KeycardChannelUnifiedQtNfc()
@@ -33,6 +43,48 @@ KeycardChannelUnifiedQtNfc::~KeycardChannelUnifiedQtNfc()
 void KeycardChannelUnifiedQtNfc::startDetection()
 {
     qDebug() << "KeycardChannelUnifiedQtNfc::startDetection()";
+
+#ifdef Q_OS_ANDROID
+    // Android-only: emitted when the OS NFC adapter is toggled on/off (or transitioning).
+    QObject::connect(m_manager, &QNearFieldManager::adapterStateChanged,
+            this, &KeycardChannelUnifiedQtNfc::onAdapterStateChanged, Qt::UniqueConnection);
+    // Qt 6.9 Android NFC uses foreground dispatch and may fail if started before the Activity
+    // is fully active/resumed. If we call too early, Qt may consider discovery enabled while
+    // the platform never actually starts delivering tag intents until a background→foreground cycle.
+    //
+    // Mitigation: defer startTargetDetection() until the Qt app is ApplicationActive.
+    auto *app = QCoreApplication::instance();
+    auto *guiApp = qobject_cast<QGuiApplication *>(app);
+    qDebug() << "KeycardChannelUnifiedQtNfc:Verifying app state=" << static_cast<int>(guiApp->applicationState());
+
+    if (guiApp && guiApp->applicationState() != Qt::ApplicationActive) {
+        qDebug() << "KeycardChannelUnifiedQtNfc: App not active yet, deferring NFC start. state="
+                 << static_cast<int>(guiApp->applicationState());
+
+        if (!m_waitingForAppActive) {
+            m_waitingForAppActive = true;
+            m_appStateConn = connect(guiApp, &QGuiApplication::applicationStateChanged,
+                                     this, [this](Qt::ApplicationState state) {
+                if (state != Qt::ApplicationActive) {
+                    return;
+                }
+
+                // One-shot: once active, drop the guard and retry immediately on the event loop.
+                m_waitingForAppActive = false;
+                QObject::disconnect(m_appStateConn);
+                m_appStateConn = {};
+
+                QTimer::singleShot(0, this, [this]() {
+                    this->startDetection();
+                });
+            });
+        }
+
+        // Keep UX consistent: we are logically waiting for a keycard, just not starting NFC yet.
+        emitChannelState(ChannelOperationalState::WaitingForKeycard);
+        return;
+    }
+#endif
 
     if (!m_manager->isSupported(QNearFieldTarget::TagTypeSpecificAccess)) {
         emitChannelState(ChannelOperationalState::NotSupported);
@@ -49,7 +101,7 @@ void KeycardChannelUnifiedQtNfc::startDetection()
         m_detectionActive = false;
         return;
     }
-    // Desktop: Start continuous detection immediately
+
     m_manager->startTargetDetection(QNearFieldTarget::TagTypeSpecificAccess);
     m_detectionActive = true;
     emit readerAvailabilityChanged(true);
@@ -58,6 +110,11 @@ void KeycardChannelUnifiedQtNfc::startDetection()
 
 void KeycardChannelUnifiedQtNfc::stopDetection()
 {
+#ifdef Q_OS_ANDROID
+    QObject::disconnect(m_manager, &QNearFieldManager::adapterStateChanged,
+        this, &KeycardChannelUnifiedQtNfc::onAdapterStateChanged);
+#endif
+    // iOS NFC session management can be sensitive to threading; serialize with transmit.
 #ifdef Q_OS_IOS
     QMutexLocker locker(&m_transmitMutex);
     qDebug() << "KeycardChannelUnifiedQtNfc::stopDetection()";
@@ -159,6 +216,44 @@ void KeycardChannelUnifiedQtNfc::onTargetLost(QNearFieldTarget* target)
     }
     emit cardRemoved();
 }
+
+#ifdef Q_OS_ANDROID
+void KeycardChannelUnifiedQtNfc::onAdapterStateChanged(QNearFieldManager::AdapterState state)
+{
+    qDebug() << "KeycardChannelUnifiedQtNfc::onAdapterStateChanged() state=" << static_cast<int>(state);
+
+    switch (state) {
+        case QNearFieldManager::AdapterState::Offline:
+        case QNearFieldManager::AdapterState::TurningOff: {
+            m_manager->stopTargetDetection();
+            m_detectionActive = false;
+            disconnect();
+            // NFC is going away: stop scanning and drop any current target.
+            // Do NOT emit Idle in-between (avoid flicker); go straight to NotAvailable.
+            emit readerAvailabilityChanged(false);
+            emitChannelState(ChannelOperationalState::NotAvailable);
+            break;
+        }
+
+        case QNearFieldManager::AdapterState::Online: {
+            emit readerAvailabilityChanged(true);
+
+            // If higher-level logic expects us to be scanning, (re)start now.
+            // Use event-loop deferral to avoid re-entrancy if this signal fires during Qt NFC internals.
+            QTimer::singleShot(0, this, [this]() { this->setState(ChannelState::WaitingForCard); });
+            break;
+        }
+
+        case QNearFieldManager::AdapterState::TurningOn: {
+            // Transitional state: avoid emitting errors; keep UX in "waiting" if applicable.
+            if (m_state == ChannelState::WaitingForCard) {
+                emitChannelState(ChannelOperationalState::WaitingForKeycard);
+            }
+            break;
+        }
+    }
+}
+#endif
 
 QString KeycardChannelUnifiedQtNfc::describe(QNearFieldTarget::Error error)
 {
