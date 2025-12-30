@@ -145,15 +145,6 @@ public:
      */
     ChannelState state() const;
     
-    /**
-     * @brief Get the current operational channel state
-     * @return Current operational state
-     * 
-     * This represents the actual operational state of the channel,
-     * controlled by the channel implementation based on its operations.
-     */
-    ChannelOperationalState channelState() const;
-    
     // IChannel interface implementation
     /**
      * @brief Transmit APDU command to Keycard

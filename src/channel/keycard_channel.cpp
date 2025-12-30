@@ -184,14 +184,6 @@ ChannelState KeycardChannel::state() const
     return ChannelState::Idle;
 }
 
-ChannelOperationalState KeycardChannel::channelState() const
-{
-    if (m_backend) {
-        return m_backend->channelState();
-    }
-    return ChannelOperationalState::Idle;
-}
-
 QByteArray KeycardChannel::transmit(const QByteArray& apdu)
 {
     if (!m_backend) {

@@ -35,7 +35,7 @@ void KeycardChannelUnifiedQtNfc::startDetection()
     qDebug() << "KeycardChannelUnifiedQtNfc::startDetection()";
 
     if (!m_manager->isSupported(QNearFieldTarget::TagTypeSpecificAccess)) {
-        updateChannelState(ChannelOperationalState::NotSupported);
+        emitChannelState(ChannelOperationalState::NotSupported);
         emit readerAvailabilityChanged(false);
         emit error("NFC not supported on this platform");
         m_detectionActive = false;
@@ -43,7 +43,7 @@ void KeycardChannelUnifiedQtNfc::startDetection()
     }
 
     if (!m_manager->isEnabled()) {
-        updateChannelState(ChannelOperationalState::NotAvailable);
+        emitChannelState(ChannelOperationalState::NotAvailable);
         emit readerAvailabilityChanged(false);
         emit error("NFC/PCSC is disabled");
         m_detectionActive = false;
@@ -53,7 +53,7 @@ void KeycardChannelUnifiedQtNfc::startDetection()
     m_manager->startTargetDetection(QNearFieldTarget::TagTypeSpecificAccess);
     m_detectionActive = true;
     emit readerAvailabilityChanged(true);
-    updateChannelState(ChannelOperationalState::WaitingForKeycard);
+    emitChannelState(ChannelOperationalState::WaitingForKeycard);
 }
 
 void KeycardChannelUnifiedQtNfc::stopDetection()
@@ -66,7 +66,7 @@ void KeycardChannelUnifiedQtNfc::stopDetection()
         m_detectionActive = false;
     }
 #endif
-    updateChannelState(ChannelOperationalState::Idle);
+    emitChannelState(ChannelOperationalState::Idle);
 }
 
 void KeycardChannelUnifiedQtNfc::setState(ChannelState state)
@@ -143,7 +143,7 @@ void KeycardChannelUnifiedQtNfc::onTargetDetected(QNearFieldTarget* target)
     // when the NFC tag is detected, to support long operations
     
     emit targetDetected(newUidHex);
-    updateChannelState(ChannelOperationalState::Reading);
+    emitChannelState(ChannelOperationalState::Reading);
 }
 
 bool KeycardChannelUnifiedQtNfc::isTargetStillValid() const
@@ -199,19 +199,19 @@ QByteArray KeycardChannelUnifiedQtNfc::transmit(const QByteArray& apdu)
     QMutexLocker locker(&m_transmitMutex);
     
     // Update state to Reading when actively transmitting
-    updateChannelState(ChannelOperationalState::Reading);
+    emitChannelState(ChannelOperationalState::Reading);
     
     // Check if target is valid
     if (!isTargetStillValid()) {
         qWarning() << "KeycardChannelUnifiedQtNfc::transmit() - target is not valid (null or stale)";
-        updateChannelState(ChannelOperationalState::Error);
+        emitChannelState(ChannelOperationalState::Error);
         throw std::runtime_error("Target is not valid (null or stale)");
     }
     
     QNearFieldTarget* target = m_target;
     if (!target) {
         qWarning() << "KeycardChannelUnifiedQtNfc::transmit() - target is null";
-        updateChannelState(ChannelOperationalState::Error);
+        emitChannelState(ChannelOperationalState::Error);
         throw std::runtime_error("Target is null");
     }
     
@@ -232,7 +232,7 @@ QByteArray KeycardChannelUnifiedQtNfc::transmit(const QByteArray& apdu)
             
             if (!invokeSuccess) {
                 qWarning() << "KeycardChannelUnifiedQtNfc::transmit() - invokeMethod failed";
-                updateChannelState(ChannelOperationalState::Error);
+                emitChannelState(ChannelOperationalState::Error);
                 throw std::runtime_error("Failed to invoke sendCommand");
             }
         }
@@ -243,7 +243,7 @@ QByteArray KeycardChannelUnifiedQtNfc::transmit(const QByteArray& apdu)
         
         if (!success) {
             qWarning() << "KeycardChannelUnifiedQtNfc::transmit() - request failed (tag lost or timeout)";
-            updateChannelState(ChannelOperationalState::Error);
+            emitChannelState(ChannelOperationalState::Error);
             // If m_target was nulled, it was tag loss not timeout
             if (!m_target) {
                 throw std::runtime_error("Tag lost during transmission");
@@ -255,18 +255,18 @@ QByteArray KeycardChannelUnifiedQtNfc::transmit(const QByteArray& apdu)
         responseVariant = target->requestResponse(requestId);
         if (!responseVariant.isValid()) {
             qWarning() << "KeycardChannelUnifiedQtNfc::transmit() - invalid response from target";
-            updateChannelState(ChannelOperationalState::Error);
+            emitChannelState(ChannelOperationalState::Error);
             throw std::runtime_error("Invalid response from target");
         }
         
     } catch (const std::exception& e) {
         qWarning() << "KeycardChannelUnifiedQtNfc::transmit() - Qt operation threw exception:" << e.what();
-        updateChannelState(ChannelOperationalState::Error);
+        emitChannelState(ChannelOperationalState::Error);
         // Check if target became stale during the call (tag was lost)
         throw std::runtime_error("Failed to transmit");
     } catch (...) {
         qWarning() << "KeycardChannelUnifiedQtNfc::transmit() - Qt operation threw unknown exception (Qt targetCheckTimer race crash)";
-        updateChannelState(ChannelOperationalState::Error);
+        emitChannelState(ChannelOperationalState::Error);
         if (!m_target) {
             throw std::runtime_error("Tag lost during transmission (Qt race condition crash)");
         }
@@ -278,13 +278,10 @@ QByteArray KeycardChannelUnifiedQtNfc::transmit(const QByteArray& apdu)
     return response;
 }
 
-void KeycardChannelUnifiedQtNfc::updateChannelState(ChannelOperationalState newState)
+void KeycardChannelUnifiedQtNfc::emitChannelState(ChannelOperationalState newState)
 {
-    qDebug() << "KeycardChannelUnifiedQtNfc::updateChannelState() called with state:" << static_cast<int>(newState) << "| current state:" << static_cast<int>(m_channelState);
-    if (m_channelState != newState) {
-        m_channelState = newState;
-        emit channelStateChanged(newState);
-    }
+    qDebug() << "KeycardChannelUnifiedQtNfc::emitChannelState() called with state:" << static_cast<int>(newState);
+    emit channelStateChanged(newState);
 }
 
 } // namespace Keycard

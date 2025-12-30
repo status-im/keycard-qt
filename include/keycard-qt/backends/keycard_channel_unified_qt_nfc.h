@@ -33,7 +33,6 @@ public:
     QString backendName() const override { return "Qt NFC (Unified)"; }
     void setState(ChannelState state) override;
     ChannelState state() const override { return m_state; }
-    ChannelOperationalState channelState() const override { return m_channelState; }
     void forceScan() override;
 
 private slots:
@@ -50,11 +49,10 @@ private:
     
     // State management
     ChannelState m_state = ChannelState::Idle;
-    ChannelOperationalState m_channelState = ChannelOperationalState::Idle;
     bool m_detectionActive = false;
     
     // Helper to update and emit channel state
-    void updateChannelState(ChannelOperationalState newState);
+    void emitChannelState(ChannelOperationalState newState);
     
     // Thread safety
     mutable QMutex m_transmitMutex;
