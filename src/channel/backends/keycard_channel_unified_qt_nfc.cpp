@@ -332,9 +332,10 @@ QByteArray KeycardChannelUnifiedQtNfc::transmit(const QByteArray& apdu)
             }
         }
         
-        // Wait for completion with 5-second timeout
-        // Returns false if tag is lost or timeout occurs
-        success = target->waitForRequestCompleted(requestId, 5000);
+        // Wait for completion with 120-second timeout
+        // Returns false if tag is lost
+        // The timeout is huge, but the goal is not to timeout here, but to wait for the command to complete or the nfc tag to disconnect.
+        success = target->waitForRequestCompleted(requestId, 120000);
         
         if (!success) {
             qWarning() << "KeycardChannelUnifiedQtNfc::transmit() - request failed (tag lost or timeout)";
