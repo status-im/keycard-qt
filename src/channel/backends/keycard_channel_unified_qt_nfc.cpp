@@ -120,6 +120,7 @@ void KeycardChannelUnifiedQtNfc::stopDetection()
     qDebug() << "KeycardChannelUnifiedQtNfc::stopDetection()";
     if (m_detectionActive) {
         m_manager->stopTargetDetection();
+        disconnect();
         m_detectionActive = false;
     }
 #endif
