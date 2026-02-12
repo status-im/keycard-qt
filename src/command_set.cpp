@@ -1431,10 +1431,6 @@ void CommandSet::stopDetection() {
         return;
     }
     
-    // Reset secure channel when stopping detection
-    // This ensures that when detection restarts, the secure channel will be properly re-established
-    resetSecureChannel();
-    
     // This runs on main thread, so it's safe to call directly
     m_channel->setState(ChannelState::Idle);
     emit channelStateChanged(ChannelState::Idle);

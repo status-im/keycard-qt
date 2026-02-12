@@ -35,7 +35,7 @@ CommunicationManager::CommunicationManager(QObject* parent)
     , m_commThread(nullptr)
     , m_state(State::Idle)
     , m_running(false)
-    , m_batchOperations(false)
+    , m_batchOperationDepth(0)
 {
     qDebug() << "CommunicationManager: Created";
 }
@@ -133,7 +133,7 @@ void CommunicationManager::stop() {
     // Step 2: Clear batch mode
     {
         QMutexLocker locker(&m_batchMutex);
-        m_batchOperations = false;
+        m_batchOperationDepth = 0;
     }
     
     // Step 3: Stop card detection
@@ -216,26 +216,46 @@ void CommunicationManager::stop() {
 }
 
 void CommunicationManager::startBatchOperations() {
-    QMutexLocker locker(&m_batchMutex);
-    if (!m_batchOperations) {
-        m_batchOperations = true;
+    int depth = 0;
+    bool becameActive = false;
+    {
+        QMutexLocker locker(&m_batchMutex);
+        if (m_batchOperationDepth == 0) {
+            becameActive = true;
+        }
+        ++m_batchOperationDepth;
+        depth = m_batchOperationDepth;
+    }
+
+    if (becameActive) {
         qDebug() << "CommunicationManager: Batch operations mode ENABLED - channel will stay open";
+    } else {
+        qDebug() << "CommunicationManager: Batch operations depth increased to" << depth;
     }
 }
 
 void CommunicationManager::endBatchOperations() {
-    bool wasBatch = false;
+    int depth = 0;
+    bool becameInactive = false;
     {
         QMutexLocker locker(&m_batchMutex);
-        wasBatch = m_batchOperations;
-        m_batchOperations = false;
+        if (m_batchOperationDepth <= 0) {
+            qWarning() << "CommunicationManager: endBatchOperations() called with depth" << m_batchOperationDepth;
+            return;
+        }
+
+        --m_batchOperationDepth;
+        depth = m_batchOperationDepth;
+        becameInactive = (m_batchOperationDepth == 0);
     }
-    
-    if (wasBatch) {
+
+    if (becameInactive) {
         qDebug() << "CommunicationManager: Batch operations mode DISABLED";
-        
+
         // Check if queue is empty and stop detection if needed
         QMetaObject::invokeMethod(this, &CommunicationManager::processQueue, Qt::QueuedConnection);
+    } else {
+        qDebug() << "CommunicationManager: Batch operations depth decreased to" << depth;
     }
 }
 
@@ -600,7 +620,7 @@ void CommunicationManager::processQueue() {
         bool inBatchMode = false;
         {
             QMutexLocker batchLocker(&m_batchMutex);
-            inBatchMode = m_batchOperations;
+            inBatchMode = (m_batchOperationDepth > 0);
         }
         
         if (inBatchMode) {
