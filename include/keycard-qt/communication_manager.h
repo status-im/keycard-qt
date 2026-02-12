@@ -102,29 +102,22 @@ public:
     void stop();
     
     /**
-     * @brief Start batch operations mode
-     * 
+     * @brief Start batch operations mode (ref-counted)
+     *
      * Prevents the communication manager from automatically stopping card detection
      * when the command queue becomes empty. Useful for performing multiple sequential
      * operations without channel stop/start cycles.
-     * 
-     * Call endBatchOperations() when done to allow automatic detection management.
-     * 
-     * Example:
-     * @code
-     * m_commMgr->startBatchOperations();
-     * // Perform multiple executeCommandSync() calls
-     * // Channel stays open between commands
-     * m_commMgr->endBatchOperations();
-     * @endcode
+     *
+     * Calls are ref-counted: every startBatchOperations() must be matched with a
+     * corresponding endBatchOperations() call.
      */
     void startBatchOperations() override;
     
     /**
-     * @brief End batch operations mode
-     * 
-     * Re-enables automatic card detection management. If the queue is empty,
-     * detection will be stopped.
+     * @brief End batch operations mode (ref-counted)
+     *
+     * Decrements the active batch reference count. Automatic detection management
+     * is re-enabled only when the count reaches zero.
      */
     void endBatchOperations() override;
     
@@ -311,8 +304,8 @@ private:
     // Running flag
     bool m_running;
     
-    // Batch operations flag - when true, don't stop detection on empty queue
-    bool m_batchOperations;
+    // Batch operations ref-count - > 0 means don't stop detection on empty queue
+    int m_batchOperationDepth;
     QMutex m_batchMutex;
 };
 

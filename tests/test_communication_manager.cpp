@@ -255,12 +255,23 @@ private slots:
     
     void testNestedBatchOperations() {
         m_commMgr->init(m_cmdSet);
-        
+
         m_commMgr->startBatchOperations();
-        m_commMgr->startBatchOperations();  // Second call should be idempotent
-        
+        m_commMgr->startBatchOperations();  // Second call should increase depth
+
         m_commMgr->endBatchOperations();
-        
+        m_commMgr->endBatchOperations();  // Fully exit batch mode
+
+        QVERIFY(true);
+    }
+
+    void testEndBatchOperationsWithoutStart() {
+        m_commMgr->init(m_cmdSet);
+
+        // Extra end calls should be safe and never underflow.
+        m_commMgr->endBatchOperations();
+        m_commMgr->endBatchOperations();
+
         QVERIFY(true);
     }
     
