@@ -136,7 +136,7 @@ QUuid token = commMgr->enqueueCommand(std::move(cmd));
 
 // Sync API (for worker threads)
 auto cmd = std::make_unique<SelectCommand>();
-CommandResult result = commMgr->executeCommandSync(std::move(cmd), 5000);
+CommandResult result = commMgr->executeCommandSync(std::move(cmd));
 ```
 
 ### Dependency Injection

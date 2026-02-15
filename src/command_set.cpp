@@ -11,7 +11,6 @@
 #include <QIODevice>
 #include <QThread>
 #include <QEventLoop>
-#include <QTimer>
 #include <QMetaObject>
 #include <QWaitCondition>
 #include <QCoreApplication>
@@ -520,7 +519,11 @@ static QByteArray parseDerivationPath(const QString& path, uint8_t& startingPoin
     
     QString cleanPath = path.trimmed();
     
-    if (cleanPath.startsWith("m/")) {
+    if (cleanPath == "m") {
+        // Go compatibility: plain "m" means master root with empty derivation.
+        startingPoint = APDU::P1DeriveKeyFromMaster;
+        cleanPath.clear();
+    } else if (cleanPath.startsWith("m/")) {
         startingPoint = APDU::P1DeriveKeyFromMaster;
         cleanPath = cleanPath.mid(2);  // Remove "m/"
     } else if (cleanPath.startsWith("../")) {
@@ -1260,30 +1263,23 @@ void CommandSet::handleCardSwap()
     qWarning() << "CommandSet: All state cleared - flow must restart with new card";
 }
 
-void CommandSet::setDefaultWaitTimeout(int timeoutMs)
-{
-    m_defaultWaitTimeout = timeoutMs;
-    qDebug() << "CommandSet: Default wait timeout set to" << timeoutMs << "ms";
-}
 
-bool CommandSet::waitForCard(int timeoutMs)
+bool CommandSet::waitForCard()
 {
-    // Use default timeout if not specified
-    if (timeoutMs < 0) {
-        timeoutMs = m_defaultWaitTimeout;
-    }
-    qDebug() << "CommandSet::waitForCard() timeout:" << timeoutMs << "ms";
-    
+    qDebug() << "CommandSet::waitForCard(): Waiting for channel events";
+
     // Check if card is already connected
     if (m_channel && m_channel->isConnected()) {
         qDebug() << "CommandSet::waitForCard(): Card already connected";
         return true;
     }
-    
+
     QEventLoop loop;
     bool cardDetected = false;
-    
-    // Connect to targetDetected signal (emitted when card is detected)
+    bool detectionStopped = false;
+    QString waitError;
+
+    // Exit when a target is detected.
     QMetaObject::Connection cardConnection = QObject::connect(
         m_channel.get(), &Keycard::KeycardChannel::targetDetected,
         [&loop, &cardDetected](const QString& uid) {
@@ -1292,20 +1288,25 @@ bool CommandSet::waitForCard(int timeoutMs)
             loop.quit();
         });
 
+    // Exit on channel errors.
     QMetaObject::Connection errorConnection = QObject::connect(
         m_channel.get(), &Keycard::KeycardChannel::error,
-        [&loop](const QString& error) {
+        [&loop, &waitError](const QString& error) {
             qDebug() << "CommandSet::waitForCard(): Error waiting for card:" << error;
+            waitError = error;
             loop.quit();
         });
 
-    
-    // Setup timeout
-    QTimer timer;
-    timer.setSingleShot(true);
-    QObject::connect(&timer, &QTimer::timeout, &loop, &QEventLoop::quit);
-    timer.start(timeoutMs);
-    
+    // Exit when backend/platform reports detection has stopped.
+    QMetaObject::Connection detectionStoppedConnection = QObject::connect(
+        m_channel.get(), &Keycard::KeycardChannel::targetDetectionStopped,
+        [&loop, &detectionStopped](bool forced) {
+            Q_UNUSED(forced);
+            qDebug() << "CommandSet::waitForCard(): Target detection stopped";
+            detectionStopped = true;
+            loop.quit();
+        });
+
     // Use lambda to call setState (works even if setState is not a slot)
     // Qt::AutoConnection (default) handles thread safety automatically:
     // - Same thread: DirectConnection (synchronous)
@@ -1321,29 +1322,38 @@ bool CommandSet::waitForCard(int timeoutMs)
         qWarning() << "CommandSet::waitForCard(): Failed to set channel state to WaitingForCard";
         QObject::disconnect(cardConnection);
         QObject::disconnect(errorConnection);
+        QObject::disconnect(detectionStoppedConnection);
         return false;
     }
 
     // Enter event loop
     loop.exec();
-    
+
     // Clean up connections
     QObject::disconnect(cardConnection);
     QObject::disconnect(errorConnection);
-    
+    QObject::disconnect(detectionStoppedConnection);
+
     if (cardDetected) {
         qDebug() << "CommandSet::waitForCard(): Card successfully detected";
         return true;
-    } else {
-        if (!timer.isActive()) {
-            qDebug() << "CommandSet::waitForCard(): Timeout waiting for card";
-            m_lastError = "Card detection timeout";
-        } else {
-            qWarning() << "CommandSet::waitForCard(): Card detection failed (error or lost)";
-            m_lastError = "Card detection failed";
-        }
+    }
+
+    if (!waitError.isEmpty()) {
+        qWarning() << "CommandSet::waitForCard(): Card detection failed:" << waitError;
+        m_lastError = waitError;
         return false;
     }
+
+    if (detectionStopped) {
+        qDebug() << "CommandSet::waitForCard(): Detection stopped before card was detected";
+        m_lastError = "User cancelled NFC";
+        throw std::runtime_error(m_lastError.toStdString());
+    }
+
+    qWarning() << "CommandSet::waitForCard(): Card detection failed";
+    m_lastError = "Card detection failed";
+    return false;
 }
 
 APDU::Response CommandSet::send(const APDU::Command& cmd, bool secure)

@@ -10,6 +10,16 @@ namespace Keycard {
 // Forward declarations
 class CommandSet;
 
+enum class CommandResultType {
+    Success,
+    Error,
+    Timeout,
+    Cancelled,
+    InvalidState,
+    InvalidCommand,
+    InvalidParameter
+};
+
 /**
  * @brief Result of a card command execution
  */
@@ -17,17 +27,18 @@ struct CommandResult {
     bool success;
     QVariant data;
     QString error;
+    CommandResultType reason;
     
-    CommandResult() : success(false) {}
-    CommandResult(bool s, const QVariant& d = QVariant(), const QString& e = QString())
-        : success(s), data(d), error(e) {}
+    CommandResult() : success(false), reason(CommandResultType::InvalidState) {}
+    CommandResult(bool s, const QVariant& d = QVariant(), const QString& e = QString(), CommandResultType t = CommandResultType::Success)
+        : success(s), data(d), error(e), reason(t) {}
     
     static CommandResult fromSuccess(const QVariant& data = QVariant()) {
-        return CommandResult(true, data);
+        return CommandResult(true, data, QString(), CommandResultType::Success);
     }
     
-    static CommandResult fromError(const QString& error) {
-        return CommandResult(false, QVariant(), error);
+    static CommandResult fromError(const QString& error, CommandResultType type = CommandResultType::Error) {
+        return CommandResult(false, QVariant(), error, type);
     }
 };
 

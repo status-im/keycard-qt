@@ -57,9 +57,10 @@ public:
     // Detection management
     virtual bool startDetection() = 0;
     virtual void stopDetection() = 0;
+    virtual void cancelPendingOperations(const QString& reason) = 0;
     
     // Command execution
-    virtual CommandResult executeCommandSync(std::unique_ptr<CardCommand> cmd, int timeoutMs = -1) = 0;
+    virtual CommandResult executeCommandSync(std::unique_ptr<CardCommand> cmd) = 0;
     
     // Card information
     virtual ApplicationInfo applicationInfo() const = 0;
@@ -87,6 +88,12 @@ signals:
      * @brief Emitted when state changes (optional - for diagnostics)
      */
     void stateChanged(int newState);
+
+    /**
+     * @brief Emitted when an operation is cancelled
+     * @param reason Reason for cancellation
+     */
+    void operationCancelled(const QString& reason);
 };
 
 } // namespace Keycard

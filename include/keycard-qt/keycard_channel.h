@@ -91,7 +91,14 @@ public:
      * an already connected card.
      */
     void stopDetection();
-    
+
+
+    /**
+     * @brief Check if detection is active
+     * @return true if detection is active, false otherwise
+     */
+    bool isDetectionActive() const;
+
     /**
      * @brief Force immediate re-scan for cards
      * 
@@ -189,6 +196,12 @@ signals:
      * After this signal, transmit() will fail until a new card is detected.
      */
     void targetLost();
+
+    /**
+     * @brief Emitted when target detection is stopped by backend/platform
+     * @param forced true if detection was forcefully stopped by the user or application
+     */
+    void targetDetectionStopped(bool forced);
     
     /**
      * @brief Emitted when an error occurs

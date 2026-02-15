@@ -78,6 +78,17 @@ void MockBackend::startDetection()
     m_detecting = true;
     qDebug() << "[MockBackend] Detection started (autoConnect:" << m_autoConnect << ")";
 
+    // If a card is already connected when detection restarts, re-emit detection.
+    // This mirrors real backends where enabling scan with a card present reports it.
+    if (m_connected) {
+        QTimer::singleShot(0, this, [this]() {
+            if (m_detecting && m_connected) {
+                emit targetDetected(m_cardUid);
+            }
+        });
+        return;
+    }
+
     if (m_autoConnect) {
         // Simulate card detection after short delay
         m_autoConnectTimer->start(50);

@@ -2,6 +2,7 @@
 #include <QDebug>
 #include <QTimer>
 #include <QCoreApplication>
+#include <QVector>
 
 namespace Keycard {
 
@@ -78,6 +79,13 @@ bool CommunicationManager::init(std::shared_ptr<CommandSet> commandSet) {
     connect(m_commandSet.get(), &CommandSet::channelStateChanged,
             this, &CommunicationManager::onChannelStateChanged,
             Qt::QueuedConnection);
+
+    // Connect to channel targetDetectionStopped (user cancelled NFC)
+    if (auto* ch = m_commandSet->channel().get()) {
+        connect(ch, &KeycardChannel::targetDetectionStopped,
+                this, &CommunicationManager::onTargetDetectionStopped,
+                Qt::QueuedConnection);
+    }
     
     m_commThread->start();
     
@@ -97,7 +105,6 @@ bool CommunicationManager::startDetection() {
     }
     
     qDebug() << "CommunicationManager: Starting card detection...";
-    
     QMetaObject::invokeMethod(m_commandSet.get(),
                                &CommandSet::startDetection,
                                Qt::QueuedConnection);
@@ -112,12 +119,63 @@ void CommunicationManager::stopDetection() {
     }
     
     qDebug() << "CommunicationManager: Stopping card detection...";
-    
     QMetaObject::invokeMethod(m_commandSet.get(),
                                &CommandSet::stopDetection,
                                Qt::QueuedConnection);
     
     qDebug() << "CommunicationManager: Card detection stopped via CommandSet";
+}
+
+void CommunicationManager::cancelPendingOperations(const QString& reason) {
+    if (!m_running) {
+        return;
+    }
+    if (QThread::currentThread() == thread()) {
+        cancelPendingOperationsInternal(reason);
+        return;
+    }
+    QMetaObject::invokeMethod(this, [this, reason]() {
+        cancelPendingOperationsInternal(reason);
+    }, Qt::QueuedConnection);
+}
+
+void CommunicationManager::cancelPendingOperationsInternal(const QString& reason) {
+    setState(State::Idle);
+    emit operationCancelled(reason);
+    stopDetection();
+    {
+        QMutexLocker locker(&m_syncMutex);
+        for (auto it = m_pendingSync.begin(); it != m_pendingSync.end();) {
+            auto sync = it.value();
+            sync->completed = true;
+            sync->result = CommandResult::fromError(reason, CommandResultType::Cancelled);
+            sync->condition.wakeAll();
+            it = m_pendingSync.erase(it);
+        }
+    }
+    QVector<QUuid> flushedTokens;
+    {
+        QMutexLocker locker(&m_queueMutex);
+        while (!m_queue.empty()) {
+            auto cmd = std::move(m_queue.front());
+            m_queue.pop();
+            flushedTokens.append(cmd->token());
+        }
+        m_queueNotEmpty.wakeAll();
+    }
+    if (!m_running) {
+        return;
+    }
+
+    for (const QUuid& token : flushedTokens) {
+        emit commandCompleted(token, CommandResult::fromError(reason, CommandResultType::Cancelled));
+    }
+}
+
+void CommunicationManager::onTargetDetectionStopped(bool forced) {
+    if (forced) {
+        cancelPendingOperationsInternal("User cancelled NFC");
+    }
 }
 
 void CommunicationManager::stop() {
@@ -136,21 +194,16 @@ void CommunicationManager::stop() {
         m_batchOperationDepth = 0;
     }
     
-    // Step 3: Stop card detection
-    stopDetection();
-    
-    // Step 4: Wake up all pending sync operations and mark them as stopped
-    {
-        QMutexLocker locker(&m_syncMutex);
-        for (auto it = m_pendingSync.begin(); it != m_pendingSync.end(); ++it) {
-            it.value()->completed = true;
-            it.value()->result = CommandResult::fromError("CommunicationManager stopped");
-            it.value()->condition.wakeAll();
-        }
+    // Step 3: Run cancel logic on comm thread (wake sync, flush queue, stop detection)
+    if (QThread::currentThread() == thread()) {
+        cancelPendingOperationsInternal("CommunicationManager stopped");
+    } else {
+        QMetaObject::invokeMethod(this, [this]() {
+            cancelPendingOperationsInternal("CommunicationManager stopped");
+        }, Qt::BlockingQueuedConnection);
     }
     
-    // Step 5: Wait for all pending sync operations to actually complete
-    // Give threads time to wake up and exit their wait loops
+    // Step 4: Wait for all pending sync operations to actually complete
     qDebug() << "CommunicationManager: Waiting for pending sync operations to complete...";
     const int maxWaitIterations = 100;  // 100 * 10ms = 1 second max
     int pendingCount = 0;
@@ -170,14 +223,7 @@ void CommunicationManager::stop() {
         qWarning() << "CommunicationManager: Still" << pendingCount << "pending sync operations after wait";
     }
     
-    // Step 6: Clear the queue and wake any threads waiting on it
-    {
-        QMutexLocker locker(&m_queueMutex);
-        std::queue<std::unique_ptr<CardCommand>>().swap(m_queue);
-        m_queueNotEmpty.wakeAll();
-    }
-    
-    // Step 7: Stop the communication thread
+    // Step 5: Stop the communication thread
     // Note: We check m_running before posting processQueue() events (see executeCommand)
     // This prevents new events from being posted after stop() begins
     if (m_commThread) {
@@ -201,13 +247,13 @@ void CommunicationManager::stop() {
         qDebug() << "CommunicationManager: Communication thread stopped";
     }
     
-    // Step 8: Final cleanup of any remaining sync operations
+    // Step 6: Final cleanup of any remaining sync operations
     {
         QMutexLocker locker(&m_syncMutex);
         m_pendingSync.clear();
     }
     
-    // Step 9: Give one final moment for any last cleanup
+    // Step 7: Give one final moment for any last cleanup
     QThread::msleep(50);
     
     setState(State::Idle);
@@ -292,7 +338,7 @@ QUuid CommunicationManager::enqueueCommand(std::unique_ptr<CardCommand> cmd) {
     return token;
 }
 
-CommandResult CommunicationManager::executeCommandSync(std::unique_ptr<CardCommand> cmd, int timeoutMs) {
+CommandResult CommunicationManager::executeCommandSync(std::unique_ptr<CardCommand> cmd) {
     if (!m_running) {
         return CommandResult::fromError("CommunicationManager not running");
     }
@@ -305,12 +351,9 @@ CommandResult CommunicationManager::executeCommandSync(std::unique_ptr<CardComma
     QUuid token = cmd->token();
     QString cmdName = cmd->name();
     
-    if (timeoutMs < 0) {
-        timeoutMs = cmd->timeoutMs();
-    }
     
     // Note: Reduced logging here to avoid qDebug race conditions with multiple threads
-    qDebug() << "CommunicationManager: Executing command synchronously:" << cmdName << "timeout:" << timeoutMs;
+    qDebug() << "CommunicationManager: Executing command synchronously:" << cmdName;
     
     // Create sync tracker on HEAP to prevent dangling pointer
     // Use shared_ptr so it stays valid even after this function returns
@@ -332,41 +375,33 @@ CommandResult CommunicationManager::executeCommandSync(std::unique_ptr<CardComma
     bool isMainThread = (currentThread == mainThread);
     
     if (isMainThread) {
-        // MAIN THREAD: Use event processing to keep UI responsive
-        qDebug() << "CommunicationManager: Waiting on main thread - processing events";
-        
-        QElapsedTimer timer;
-        timer.start();
-        
+        // MAIN THREAD: Process events while waiting so UI stays responsive.
+        qDebug() << "CommunicationManager: Waiting on main thread for sync completion";
+
         QMutexLocker locker(&m_syncMutex);
-        
-        while (!sync->completed && timer.elapsed() < timeoutMs) {
-            // Unlock mutex to allow event processing
+
+        while (!sync->completed && m_running) {
+            // Unlock mutex to allow event processing.
             locker.unlock();
-            
-            // Process Qt events (keeps UI responsive!)
-            // SAFE: We checked we're on the main thread
             QCoreApplication::processEvents(QEventLoop::AllEvents, 100);
-            
-            // Re-lock and check completion
             locker.relock();
-            
+
             if (!sync->completed) {
                 sync->condition.wait(&m_syncMutex, 100);
             }
         }
     } else {
-        // BACKGROUND THREAD: Use simple blocking wait
-        qDebug() << "CommunicationManager: Waiting on background thread - blocking wait";
-        
+        // BACKGROUND THREAD: Wait until command completes or manager stops.
+        qDebug() << "CommunicationManager: Waiting on background thread for sync completion";
+
         QMutexLocker locker(&m_syncMutex);
-        
+        while (!sync->completed && m_running) {
+            sync->condition.wait(&m_syncMutex);
+        }
+
         if (!sync->completed) {
-            bool success = sync->condition.wait(&m_syncMutex, timeoutMs);
-            if (!success) {
-                qWarning() << "CommunicationManager: Sync command timed out:" << cmdName;
-                sync->result = CommandResult::fromError("Command timeout");
-            }
+            sync->completed = true;
+            sync->result = CommandResult::fromError("CommunicationManager stopped");
         }
     }
     
@@ -375,8 +410,8 @@ CommandResult CommunicationManager::executeCommandSync(std::unique_ptr<CardComma
     {
         QMutexLocker locker(&m_syncMutex);
         if (!sync->completed) {
-            qWarning() << "CommunicationManager: Sync command timed out:" << cmdName;
-            finalResult = CommandResult::fromError("Command timeout");
+            qWarning() << "CommunicationManager: Sync command ended without completion:" << cmdName;
+            finalResult = CommandResult::fromError("CommunicationManager stopped");
         } else {
             finalResult = sync->result;
         }
@@ -635,6 +670,7 @@ void CommunicationManager::processQueue() {
             qDebug() << "Empty command queue - stopping keycard detection";
             locker.unlock();  // Release queue lock before calling stopDetection
             stateLocker.unlock();
+            setState(State::Idle);
             stopDetection();
         }
         return;
@@ -698,10 +734,18 @@ void CommunicationManager::processQueue() {
         result = cmd->execute(m_commandSet.get());
     } catch (const std::runtime_error& e) {
         qWarning() << "CommunicationManager: Command threw exception:" << e.what();
-        // Re-queue at front
-        m_queue.push(std::move(cmd));
-        startDetection();
-        return;
+        if (m_commandSet && m_commandSet->isDetectionActive()) {
+            // Re-queue at front
+            {
+                QMutexLocker queueLocker(&m_queueMutex);
+                m_queue.push(std::move(cmd));
+                m_queueNotEmpty.wakeOne();
+            }
+            stopDetection();
+            startDetection();
+            return;
+        }
+        result = CommandResult::fromError(e.what());
     } catch (...) {
         qWarning() << "CommunicationManager: Command threw unknown exception";
         result = CommandResult::fromError("Unknown exception");

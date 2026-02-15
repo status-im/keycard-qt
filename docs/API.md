@@ -175,14 +175,13 @@ connect(commManager.get(), &CommunicationManager::commandCompleted,
 
 ```cpp
 // Execute command synchronously (blocks until complete)
-CommandResult executeCommandSync(std::unique_ptr<CardCommand> cmd, 
-                                  int timeoutMs = -1);
+CommandResult executeCommandSync(std::unique_ptr<CardCommand> cmd);
 ```
 
 **Example:**
 ```cpp
 auto cmd = std::make_unique<VerifyPINCommand>("123456");
-CommandResult result = commManager->executeCommandSync(std::move(cmd), 5000);
+CommandResult result = commManager->executeCommandSync(std::move(cmd));
 
 if (result.success) {
     qDebug() << "PIN verified!";
@@ -637,10 +636,7 @@ QByteArray getData(uint8_t type);
 QByteArray identify(const QByteArray& challenge = QByteArray());
 
 // Wait for card presence
-bool waitForCard(int timeoutMs = -1);
-
-// Set default wait timeout
-void setDefaultWaitTimeout(int timeoutMs);
+bool waitForCard();
 
 // Get last error message
 QString lastError() const;
@@ -1324,7 +1320,7 @@ commManager->startDetection();
 ```cpp
 // Verify PIN (blocks until complete, but thread-safe!)
 auto verifyCmd = std::make_unique<VerifyPINCommand>("123456");
-CommandResult result = commManager->executeCommandSync(std::move(verifyCmd), 5000);
+CommandResult result = commManager->executeCommandSync(std::move(verifyCmd));
 
 if (result.success) {
     qDebug() << "PIN verified!";
@@ -1332,7 +1328,7 @@ if (result.success) {
     // Sign a transaction
     QByteArray hash = /* 32-byte hash */;
     auto signCmd = std::make_unique<SignCommand>(hash, "m/44'/60'/0'/0/0");
-    CommandResult signResult = commManager->executeCommandSync(std::move(signCmd), 30000);
+    CommandResult signResult = commManager->executeCommandSync(std::move(signCmd));
     
     if (signResult.success) {
         QByteArray signature = signResult.data.toMap()["signature"].toByteArray();
@@ -1398,7 +1394,7 @@ connect(commManager.get(), &CommunicationManager::cardInitialized,
     if (!result.appInfo.initialized) {
         // Initialize new card
         auto initCmd = std::make_unique<InitCommand>("123456", "123456789012", "KeycardDefaultPairing");
-        CommandResult initResult = commManager->executeCommandSync(std::move(initCmd), 60000);
+        CommandResult initResult = commManager->executeCommandSync(std::move(initCmd));
         
         if (!initResult.success) {
             qWarning() << "Init failed:" << initResult.error;
@@ -1681,14 +1677,8 @@ constexpr uint8_t P1StoreDataCash = 0x02;    // Cash data
    }
    ```
 
-2. **Handle platform-specific timeouts:**
-   ```cpp
-   #ifdef Q_OS_IOS
-       cmdSet->setDefaultWaitTimeout(30000);  // 30s for iOS
-   #else
-       cmdSet->setDefaultWaitTimeout(60000);  // 60s for desktop
-   #endif
-   ```
+2. **Use event-driven card waiting:**
+   `waitForCard()` now waits for channel events (detect/error/detection-stopped) instead of a timeout.
 
 ---
 
