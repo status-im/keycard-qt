@@ -23,6 +23,12 @@ KeycardChannelUnifiedQtNfc::KeycardChannelUnifiedQtNfc(QObject* parent)
             this, &KeycardChannelUnifiedQtNfc::onTargetDetected, Qt::DirectConnection);
     connect(m_manager, &QNearFieldManager::targetLost,
             this, &KeycardChannelUnifiedQtNfc::onTargetLost, Qt::DirectConnection);
+    connect(m_manager, &QNearFieldManager::targetDetectionStopped,
+            this, [this]() {
+                emit targetDetectionStopped(m_detectionActive);
+                m_detectionActive = false;
+                emitChannelState(ChannelOperationalState::Idle);
+            });
     connect(this, &KeycardChannelUnifiedQtNfc::channelStateChanged, this, [this](ChannelOperationalState state) {
         if (state == ChannelOperationalState::WaitingForKeycard) {
             m_manager->setUserInformation("Waiting for keycard. Please hold the keycard near the device.");
@@ -110,20 +116,45 @@ void KeycardChannelUnifiedQtNfc::startDetection()
 
 void KeycardChannelUnifiedQtNfc::stopDetection()
 {
+    if (!m_detectionActive) {
+#ifdef Q_OS_ANDROID
+        if (m_waitingForAppActive && m_appStateConn) {
+            QObject::disconnect(m_appStateConn);
+            m_appStateConn = {};
+            m_waitingForAppActive = false;
+        }
+#endif
+        emitChannelState(ChannelOperationalState::Idle);
+        return;
+    }
+
 #ifdef Q_OS_ANDROID
     QObject::disconnect(m_manager, &QNearFieldManager::adapterStateChanged,
         this, &KeycardChannelUnifiedQtNfc::onAdapterStateChanged);
+    if (m_waitingForAppActive && m_appStateConn) {
+        QObject::disconnect(m_appStateConn);
+        m_appStateConn = {};
+        m_waitingForAppActive = false;
+    }
+    m_detectionActive = false;
+    m_manager->stopTargetDetection();
+    disconnect();
 #endif
-    // iOS NFC session management can be sensitive to threading; serialize with transmit.
+
 #ifdef Q_OS_IOS
     QMutexLocker locker(&m_transmitMutex);
     qDebug() << "KeycardChannelUnifiedQtNfc::stopDetection()";
-    if (m_detectionActive) {
-        m_manager->stopTargetDetection();
-        disconnect();
-        m_detectionActive = false;
-    }
+    m_detectionActive = false;
+    m_manager->stopTargetDetection();
+    disconnect();
 #endif
+
+#if !defined(Q_OS_ANDROID) && !defined(Q_OS_IOS)
+    m_manager->stopTargetDetection();
+    disconnect();
+    m_detectionActive = false;
+#endif
+
     emitChannelState(ChannelOperationalState::Idle);
 }
 
@@ -196,9 +227,6 @@ void KeycardChannelUnifiedQtNfc::onTargetDetected(QNearFieldTarget* target)
         disconnect();
     }       
     m_target = target;
-    
-    // Note: On Android, NFC timeout is extended to 120 seconds by StatusQtActivity
-    // when the NFC tag is detected, to support long operations
     
     emit targetDetected(newUidHex);
     emitChannelState(ChannelOperationalState::Reading);
@@ -320,10 +348,19 @@ QByteArray KeycardChannelUnifiedQtNfc::transmit(const QByteArray& apdu)
         // Send command (cross-thread if needed)
         if (QThread::currentThread() == target->thread()) {
             requestId = target->sendCommand(apdu);
+            // Wait for completion with 120-second timeout
+            // Returns false if tag is lost
+            // The timeout is huge, but the goal is not to timeout here, but to wait for the command to complete or the nfc tag to disconnect.
+            success = target->waitForRequestCompleted(requestId, 120000);
         } else {
             bool invokeSuccess = QMetaObject::invokeMethod(this, 
-                [target, apdu, &requestId]() {
+                [target, apdu, &requestId, &success]() {
                     requestId = target->sendCommand(apdu);
+                    qDebug() << "KeycardChannelUnifiedQtNfc::transmit() - sendCommand() called";
+                    // Wait for completion with 120-second timeout
+                    // Returns false if tag is lost
+                    // The timeout is huge, but the goal is not to timeout here, but to wait for the command to complete or the nfc tag to disconnect.
+                    success = target->waitForRequestCompleted(requestId, 120000);
                 }, Qt::BlockingQueuedConnection);
             
             if (!invokeSuccess) {
@@ -332,11 +369,6 @@ QByteArray KeycardChannelUnifiedQtNfc::transmit(const QByteArray& apdu)
                 throw std::runtime_error("Failed to invoke sendCommand");
             }
         }
-        
-        // Wait for completion with 120-second timeout
-        // Returns false if tag is lost
-        // The timeout is huge, but the goal is not to timeout here, but to wait for the command to complete or the nfc tag to disconnect.
-        success = target->waitForRequestCompleted(requestId, 120000);
         
         if (!success) {
             qWarning() << "KeycardChannelUnifiedQtNfc::transmit() - request failed (tag lost or timeout)";

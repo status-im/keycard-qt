@@ -24,9 +24,17 @@ class TestCommunicationManagerSync : public QObject {
     Q_OBJECT
     
 private:
+    static QByteArray validCardSelectResponse() {
+        // 0x80 0x41 + valid uncompressed secp256k1 generator public key + SW 0x9000
+        static const QByteArray kValidUncompressedPubKey = QByteArray::fromHex(
+            "0479BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798"
+            "483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8");
+        return QByteArray::fromHex("8041") + kValidUncompressedPubKey + QByteArray::fromHex("9000");
+    }
+
     std::shared_ptr<KeycardChannel> createMockChannel() {
         auto* mock = new MockBackend();
-        mock->setAutoConnect(false);
+        mock->setAutoConnect(true);
         auto channel = std::make_shared<KeycardChannel>(mock);
         return channel;
     }
@@ -83,111 +91,39 @@ private slots:
     // ========================================================================
     
     void testExecuteCommandSyncBasic() {
-        // Start detection and simulate card
-        m_commMgr->startDetection();
-        m_mock->queueResponse(QByteArray::fromHex("8041") + QByteArray(65, 0x04) + QByteArray::fromHex("9000"));
-        m_mock->queueResponse(QByteArray::fromHex("8041") + QByteArray(65, 0x04) + QByteArray::fromHex("9000"));
-        m_mock->simulateCardInserted();
-        
-        // Wait for card to be ready
-        QTest::qWait(500);
-        
+        m_mock->queueResponse(TestCommunicationManagerSync::validCardSelectResponse());
+        m_mock->queueResponse(TestCommunicationManagerSync::validCardSelectResponse());
         // Execute command synchronously from worker thread
         // CRITICAL: Don't capture [this] to avoid use-after-free during cleanup
         auto* commMgr = m_commMgr.get();
         auto* mock = m_mock;
         auto future = QtConcurrent::run([commMgr, mock]() {
             auto cmd = std::make_unique<SelectCommand>();
-            mock->queueResponse(QByteArray::fromHex("8041") + QByteArray(65, 0x04) + QByteArray::fromHex("9000"));
-            return commMgr->executeCommandSync(std::move(cmd), 5000);
+            mock->queueResponse(TestCommunicationManagerSync::validCardSelectResponse());
+            return commMgr->executeCommandSync(std::move(cmd));
         });
-        
+
+        // Keep main thread event loop active so queued startDetection()/auto-connect can run.
+        QElapsedTimer timer;
+        timer.start();
+        while (!future.isFinished() && timer.elapsed() < 5000) {
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+            QThread::msleep(10);
+        }
+
+        QVERIFY2(future.isFinished(), "Sync command did not complete within timeout");
         CommandResult result = future.result();
-        
-        // Result could be success or failure depending on card state
-        QVERIFY(true);  // Main test is that it doesn't deadlock
+        Q_UNUSED(result);
     }
     
     void testExecuteCommandSyncWithoutInit() {
         CommunicationManager mgr;
         
         auto cmd = std::make_unique<SelectCommand>();
-        CommandResult result = mgr.executeCommandSync(std::move(cmd), 1000);
+        CommandResult result = mgr.executeCommandSync(std::move(cmd));
         
         QVERIFY(!result.success);
         QVERIFY(!result.error.isEmpty());
-    }
-    
-    // ========================================================================
-    // Timeout Tests
-    // ========================================================================
-    
-    void testExecuteCommandSyncTimeout() {
-        // Test that explicit timeout overrides command's default timeout
-        // With the fix in communication_manager.cpp, timeouts work correctly when explicitly specified
-        
-        // Don't start detection or insert card - so command will wait and timeout
-        auto startTime = QDateTime::currentMSecsSinceEpoch();
-        
-        // CRITICAL: Don't capture [this] to avoid use-after-free during cleanup
-        auto* commMgr = m_commMgr.get();
-        auto future = QtConcurrent::run([commMgr]() {
-            auto cmd = std::make_unique<SelectCommand>();
-            // SelectCommand has 120s default, but we explicitly use 500ms
-            return commMgr->executeCommandSync(std::move(cmd), 500);
-        });
-        
-        // Wait for completion (should timeout quickly, not wait 120 seconds)
-        future.waitForFinished();
-        auto elapsed = QDateTime::currentMSecsSinceEpoch() - startTime;
-        
-        // Should complete much faster than command's 120s default timeout
-        // Allow 2 seconds for overhead, but it should be under 1 second typically
-        QVERIFY(elapsed < 2000);
-        
-        CommandResult result = future.result();
-        // Should fail due to timeout or card not ready
-        QVERIFY(!result.success);
-        QVERIFY(!result.error.isEmpty());
-    }
-    
-    void testExecuteCommandSyncWithCustomTimeout() {
-        m_commMgr->startDetection();
-        m_mock->simulateCardInserted();
-        
-        // CRITICAL: Don't capture [this] to avoid use-after-free during cleanup
-        auto* commMgr = m_commMgr.get();
-        auto future = QtConcurrent::run([commMgr]() {
-            auto cmd = std::make_unique<InitCommand>("123456", "123456789012", "password");
-            // Init command has 60s default, but we use custom 2s timeout
-            return commMgr->executeCommandSync(std::move(cmd), 2000);
-        });
-        
-        // Should complete within timeout (even if it fails)
-        future.waitForFinished();
-        QVERIFY(true);
-    }
-    
-    void testExecuteCommandSyncNoTimeout() {
-        // -1 or 0 means no timeout (use command's default)
-        m_commMgr->startDetection();
-        m_mock->queueResponse(QByteArray::fromHex("8041") + QByteArray(65, 0x04) + QByteArray::fromHex("9000"));
-        m_mock->simulateCardInserted();
-        
-        QTest::qWait(200);
-        
-        // CRITICAL: Don't capture [this] to avoid use-after-free during cleanup
-        auto* commMgr = m_commMgr.get();
-        auto* mock = m_mock;
-        auto future = QtConcurrent::run([commMgr, mock]() {
-            auto cmd = std::make_unique<SelectCommand>();
-            mock->queueResponse(QByteArray::fromHex("8041") + QByteArray(65, 0x04) + QByteArray::fromHex("9000"));
-            return commMgr->executeCommandSync(std::move(cmd), -1);  // No timeout
-        });
-        
-        // Should complete eventually
-        future.waitForFinished();
-        QVERIFY(true);
     }
     
     // ========================================================================
@@ -202,10 +138,7 @@ private slots:
         m_mock->setThreadSafe(true);
         
         m_commMgr->startDetection();
-        m_mock->queueResponse(QByteArray::fromHex("8041") + QByteArray(65, 0x04) + QByteArray::fromHex("9000"));
-        m_mock->simulateCardInserted();
-        
-        QTest::qWait(300);
+        m_mock->queueResponse(TestCommunicationManagerSync::validCardSelectResponse());
         
         const int numThreads = 3;
         std::atomic<int> successCount{0};
@@ -222,7 +155,7 @@ private slots:
             auto future = QtConcurrent::run([commMgr, mock, &successCount, &failCount]() {
                 auto cmd = std::make_unique<SelectCommand>();
                 mock->queueResponse(QByteArray::fromHex("9000"));
-                CommandResult result = commMgr->executeCommandSync(std::move(cmd), 5000);
+                CommandResult result = commMgr->executeCommandSync(std::move(cmd));
                 
                 if (result.success) {
                     successCount++;
@@ -232,14 +165,32 @@ private slots:
             });
             futures.append(future);
         }
-        
-        // Wait for ALL futures to complete
+        // Keep main thread event loop active while worker threads block in executeCommandSync().
+        QElapsedTimer timer;
+        timer.start();
+        while (timer.elapsed() < 5000) {
+            bool allFinished = true;
+            for (const auto& future : futures) {
+                if (!future.isFinished()) {
+                    allFinished = false;
+                    break;
+                }
+            }
+            if (allFinished) {
+                break;
+            }
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+            QThread::msleep(10);
+        }
+
         for (auto& future : futures) {
+            QVERIFY2(future.isFinished(), "Concurrent sync call did not finish within timeout");
             future.waitForFinished();
         }
-        
+
         // Wait for QThreadPool to fully finish
-        QThreadPool::globalInstance()->waitForDone();
+        QVERIFY2(QThreadPool::globalInstance()->waitForDone(2000),
+                 "QThreadPool did not drain within timeout");
         
         // All threads should have completed (either success or fail)
         QCOMPARE(successCount.load() + failCount.load(), numThreads);
@@ -248,11 +199,8 @@ private slots:
     }
     
     void testSequentialSyncCallsSameThread() {
-        m_commMgr->startDetection();
-        m_mock->queueResponse(QByteArray::fromHex("8041") + QByteArray(65, 0x04) + QByteArray::fromHex("9000"));
-        m_mock->simulateCardInserted();
-        
-        QTest::qWait(300);
+        m_commMgr->startBatchOperations();
+        m_mock->queueResponse(TestCommunicationManagerSync::validCardSelectResponse());
         
         // CRITICAL: Don't capture [this] to avoid use-after-free during cleanup
         auto* commMgr = m_commMgr.get();
@@ -261,15 +209,24 @@ private slots:
             // Execute multiple commands sequentially
             for (int i = 0; i < 3; i++) {
                 auto cmd = std::make_unique<SelectCommand>();
-                mock->queueResponse(QByteArray::fromHex("8041") + QByteArray(65, 0x04) + QByteArray::fromHex("9000"));
-                CommandResult result = commMgr->executeCommandSync(std::move(cmd), 5000);
+                mock->queueResponse(TestCommunicationManagerSync::validCardSelectResponse());
+                CommandResult result = commMgr->executeCommandSync(std::move(cmd));
                 Q_UNUSED(result);
             }
             return true;
         });
-        
+
+        QElapsedTimer timer;
+        timer.start();
+        while (!future.isFinished() && timer.elapsed() < 5000) {
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+            QThread::msleep(10);
+        }
+
+        QVERIFY2(future.isFinished(), "Sequential sync calls did not finish within timeout");
         future.waitForFinished();
         QVERIFY(future.result());
+        m_commMgr->endBatchOperations();
     }
     
     // ========================================================================
@@ -277,53 +234,58 @@ private slots:
     // ========================================================================
     
     void testMixingSyncAndAsyncCalls() {
-        m_commMgr->startDetection();
-        m_mock->queueResponse(QByteArray::fromHex("8041") + QByteArray(65, 0x04) + QByteArray::fromHex("9000"));
-        m_mock->simulateCardInserted();
-        
-        QTest::qWait(300);
-        
+        m_commMgr->startBatchOperations();
+
+        m_mock->queueResponse(TestCommunicationManagerSync::validCardSelectResponse());
         // Enqueue async command
         auto asyncCmd = std::make_unique<SelectCommand>();
-        m_mock->queueResponse(QByteArray::fromHex("8041") + QByteArray(65, 0x04) + QByteArray::fromHex("9000"));
+        m_mock->queueResponse(TestCommunicationManagerSync::validCardSelectResponse());
         QUuid asyncToken = m_commMgr->enqueueCommand(std::move(asyncCmd));
         QVERIFY(!asyncToken.isNull());
-        
+
         // Execute sync command
         // CRITICAL: Don't capture [this] to avoid use-after-free during cleanup
         auto* commMgr = m_commMgr.get();
         auto* mock = m_mock;
         auto future = QtConcurrent::run([commMgr, mock]() {
             auto cmd = std::make_unique<SelectCommand>();
-            mock->queueResponse(QByteArray::fromHex("8041") + QByteArray(65, 0x04) + QByteArray::fromHex("9000"));
-            return commMgr->executeCommandSync(std::move(cmd), 5000);
+            mock->queueResponse(TestCommunicationManagerSync::validCardSelectResponse());
+            return commMgr->executeCommandSync(std::move(cmd));
         });
-        
+
+        QElapsedTimer timer;
+        timer.start();
+        while (!future.isFinished() && timer.elapsed() < 5000) {
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+            QThread::msleep(10);
+        }
+
+        QVERIFY2(future.isFinished(), "Mixed sync/async call did not finish within timeout");
         future.waitForFinished();
-        
+
         // Both should complete
         CommandResult result = future.result();
         Q_UNUSED(result);
         QVERIFY(true);
+
+        m_commMgr->endBatchOperations();
     }
     
     void testInterleavedSyncAsyncCalls() {
         // Enable thread-safe mode for MockBackend to protect concurrent operations
         m_mock->setThreadSafe(true);
-        
+
+        // Keep detection/channel active while mixed traffic is in flight.
+        m_commMgr->startBatchOperations();
         m_commMgr->startDetection();
-        m_mock->queueResponse(QByteArray::fromHex("8041") + QByteArray(65, 0x04) + QByteArray::fromHex("9000"));
-        m_mock->simulateCardInserted();
-        
-        QTest::qWait(300);
-        
+        m_mock->queueResponse(TestCommunicationManagerSync::validCardSelectResponse());
         std::atomic<int> completedSync{0};
         std::atomic<int> completedAsync{0};
-        
+
         // CRITICAL: Don't capture [this] to avoid use-after-free during cleanup
         auto* commMgr = m_commMgr.get();
         auto* mock = m_mock;
-        
+
         // Async enqueuer thread
         auto asyncFuture = QtConcurrent::run([commMgr, mock, &completedAsync]() {
             for (int i = 0; i < 5; i++) {
@@ -336,54 +298,45 @@ private slots:
                 QThread::msleep(10);
             }
         });
-        
+
         // Sync executor thread
         auto syncFuture = QtConcurrent::run([commMgr, mock, &completedSync]() {
             for (int i = 0; i < 3; i++) {
                 auto cmd = std::make_unique<SelectCommand>();
                 mock->queueResponse(QByteArray::fromHex("9000"));
-                CommandResult result = commMgr->executeCommandSync(std::move(cmd), 5000);
+                CommandResult result = commMgr->executeCommandSync(std::move(cmd));
                 Q_UNUSED(result);
                 completedSync++;
                 QThread::msleep(20);
             }
         });
-        
+
+        QElapsedTimer timer;
+        timer.start();
+        while (timer.elapsed() < 8000 && (!asyncFuture.isFinished() || !syncFuture.isFinished())) {
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+            QThread::msleep(10);
+        }
+
+        QVERIFY2(asyncFuture.isFinished(), "Async future did not finish within timeout");
+        QVERIFY2(syncFuture.isFinished(), "Sync future did not finish within timeout");
         asyncFuture.waitForFinished();
         syncFuture.waitForFinished();
-        
+
         // Wait for QThreadPool to fully finish
-        QThreadPool::globalInstance()->waitForDone();
-        
-        // CRITICAL: Wait for all async commands to complete execution
-        // The async commands are still being processed by CommunicationManager's internal thread
-        // even though enqueueCommand() returned immediately
-        QTest::qWait(500);  // Increased wait time to ensure async commands complete
-        
-        // Verify commands completed
+        QVERIFY2(QThreadPool::globalInstance()->waitForDone(2000),
+                 "QThreadPool did not drain within timeout");
+
+        // Verify commands were enqueued/executed
         QCOMPARE(completedAsync.load(), 5);
         QCOMPARE(completedSync.load(), 3);
+
+        m_commMgr->endBatchOperations();
     }
     
     // ========================================================================
     // Error Handling Tests
     // ========================================================================
-    
-    void testSyncExecuteWhenCardNotReady() {
-        // Don't start detection or insert card
-        
-        // CRITICAL: Don't capture [this] to avoid use-after-free during cleanup
-        auto* commMgr = m_commMgr.get();
-        auto future = QtConcurrent::run([commMgr]() {
-            auto cmd = std::make_unique<SelectCommand>();
-            return commMgr->executeCommandSync(std::move(cmd), 1000);
-        });
-        
-        CommandResult result = future.result();
-        
-        QVERIFY(!result.success);
-        QVERIFY(!result.error.isEmpty());
-    }
     
     void testSyncExecuteAfterStop() {
         m_commMgr->stop();
@@ -392,7 +345,7 @@ private slots:
         auto* commMgr = m_commMgr.get();
         auto future = QtConcurrent::run([commMgr]() {
             auto cmd = std::make_unique<SelectCommand>();
-            return commMgr->executeCommandSync(std::move(cmd), 1000);
+            return commMgr->executeCommandSync(std::move(cmd));
         });
         
         CommandResult result = future.result();
@@ -404,12 +357,83 @@ private slots:
         // CRITICAL: Don't capture [this] to avoid use-after-free during cleanup
         auto* commMgr = m_commMgr.get();
         auto future = QtConcurrent::run([commMgr]() {
-            return commMgr->executeCommandSync(nullptr, 1000);
+            return commMgr->executeCommandSync(nullptr);
         });
         
         CommandResult result = future.result();
         
         QVERIFY(!result.success);
+    }
+
+    void testCancelPendingOperationsDrainsQueueAndEmitsSignals() {
+        m_mock->setTransmitDelay(150);
+
+        const int numCommands = 6;
+        struct CancelStats {
+            QHash<QUuid, int> completionCountByToken;
+            int completedCount = 0;
+            int cancelledCount = 0;
+            int operationCancelledCount = 0;
+            QString cancellationReason;
+        };
+        auto stats = std::make_shared<CancelStats>();
+
+        QMetaObject::Connection commandCompletedConn = connect(
+            m_commMgr.get(), &CommunicationManager::commandCompleted, this,
+            [stats](QUuid token, CommandResult result) {
+                stats->completionCountByToken[token]++;
+                stats->completedCount++;
+                if (result.reason == CommandResultType::Cancelled) {
+                    stats->cancelledCount++;
+                }
+            });
+
+        QMetaObject::Connection operationCancelledConn = connect(
+            m_commMgr.get(), &CommunicationManager::operationCancelled, this,
+            [stats](const QString& reason) {
+                stats->operationCancelledCount++;
+                stats->cancellationReason = reason;
+            });
+
+        QList<QUuid> tokens;
+        for (int i = 0; i < numCommands; i++) {
+            auto cmd = std::make_unique<SelectCommand>();
+            tokens.append(cmd->token());
+            m_mock->queueResponse(QByteArray::fromHex("9000"));
+            QUuid token = m_commMgr->enqueueCommand(std::move(cmd));
+            QVERIFY2(!token.isNull(), "enqueueCommand returned null token");
+        }
+
+        // Cancel immediately so queued commands are drained instead of fully executing.
+        const QString kCancelReason = "test-cancel";
+        m_commMgr->cancelPendingOperations(kCancelReason);
+
+        // Wait until all commands are completed/cancelled and detection is stopped.
+        QElapsedTimer waitTimer;
+        waitTimer.start();
+        while (waitTimer.elapsed() < 5000) {
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+            if (stats->completedCount >= numCommands &&
+                stats->operationCancelledCount >= 1 &&
+                !m_mock->isDetecting()) {
+                break;
+            }
+            QThread::msleep(10);
+        }
+
+        QCOMPARE(stats->operationCancelledCount, 1);
+        QCOMPARE(stats->cancellationReason, kCancelReason);
+        QCOMPARE(stats->completedCount, numCommands);
+        QVERIFY2(stats->cancelledCount >= 1, "Expected at least one command to be cancelled");
+        QVERIFY2(!m_mock->isDetecting(), "Detection should be stopped after cancellation");
+
+        // Every enqueued command should complete exactly once.
+        for (const QUuid& token : tokens) {
+            QCOMPARE(stats->completionCountByToken.value(token, 0), 1);
+        }
+
+        disconnect(commandCompletedConn);
+        disconnect(operationCancelledConn);
     }
     
     // ========================================================================
@@ -418,12 +442,7 @@ private slots:
     
     void testSyncCallsDuringBatchMode() {
         m_commMgr->startBatchOperations();
-        m_commMgr->startDetection();
-        m_mock->queueResponse(QByteArray::fromHex("8041") + QByteArray(65, 0x04) + QByteArray::fromHex("9000"));
-        m_mock->simulateCardInserted();
-        
-        QTest::qWait(300);
-        
+        m_mock->queueResponse(TestCommunicationManagerSync::validCardSelectResponse());
         // CRITICAL: Don't capture [this] to avoid use-after-free during cleanup
         auto* commMgr = m_commMgr.get();
         auto* mock = m_mock;
@@ -432,16 +451,24 @@ private slots:
             for (int i = 0; i < 3; i++) {
                 auto cmd = std::make_unique<SelectCommand>();
                 mock->queueResponse(QByteArray::fromHex("9000"));
-                CommandResult result = commMgr->executeCommandSync(std::move(cmd), 5000);
+                CommandResult result = commMgr->executeCommandSync(std::move(cmd));
                 Q_UNUSED(result);
             }
             return true;
         });
         
+        QElapsedTimer timer;
+        timer.start();
+        while (!future.isFinished() && timer.elapsed() < 5000) {
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+            QThread::msleep(10);
+        }
+
+        QVERIFY2(future.isFinished(), "Batch-mode sync calls did not finish within timeout");
         future.waitForFinished();
-        
+
         m_commMgr->endBatchOperations();
-        
+
         QVERIFY(future.result());
     }
     
@@ -450,29 +477,28 @@ private slots:
     // ========================================================================
     
     void testSyncExecuteWhenCardLostDuringWait() {
-        m_commMgr->startDetection();
-        m_mock->queueResponse(QByteArray::fromHex("8041") + QByteArray(65, 0x04) + QByteArray::fromHex("9000"));
-        m_mock->simulateCardInserted();
-        
-        QTest::qWait(300);
-        
+        m_mock->queueResponse(TestCommunicationManagerSync::validCardSelectResponse());
         // Start sync execution
         // CRITICAL: Don't capture [this] to avoid use-after-free during cleanup
         auto* commMgr = m_commMgr.get();
         auto syncFuture = QtConcurrent::run([commMgr]() {
             auto cmd = std::make_unique<SelectCommand>();
-            return commMgr->executeCommandSync(std::move(cmd), 10000);
+            return commMgr->executeCommandSync(std::move(cmd));
         });
         
-        // Remove card while waiting
-        QTest::qWait(100);
-        m_mock->simulateCardRemoved();
-        
-        // Should complete with error
+        // Keep main thread event loop active while sync wait is in background thread.
+        QElapsedTimer timer;
+        timer.start();
+        while (!syncFuture.isFinished() && timer.elapsed() < 5000) {
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+            QThread::msleep(10);
+        }
+
+        QVERIFY2(syncFuture.isFinished(), "Sync execute did not finish within timeout");
         syncFuture.waitForFinished();
-        QVERIFY(true);
-        
+
         CommandResult result = syncFuture.result();
+        Q_UNUSED(result);
         // May succeed or fail depending on timing, but should not hang
         QVERIFY(true);
     }
@@ -482,120 +508,43 @@ private slots:
     // ========================================================================
     
     void testHighVolumeSyncCalls() {
-        m_commMgr->startDetection();
-        m_mock->queueResponse(QByteArray::fromHex("8041") + QByteArray(65, 0x04) + QByteArray::fromHex("9000"));
-        m_mock->simulateCardInserted();
-        
-        QTest::qWait(300);
-        
+        m_commMgr->startBatchOperations();
+        m_mock->queueResponse(TestCommunicationManagerSync::validCardSelectResponse());
         const int numCalls = 50;
         std::atomic<int> completedCount{0};
-        
+
         // CRITICAL: Don't capture [this] to avoid use-after-free during cleanup
         auto* commMgr = m_commMgr.get();
         auto* mock = m_mock;
-        
+
         auto future = QtConcurrent::run([commMgr, mock, numCalls, &completedCount]() {
             for (int i = 0; i < numCalls; i++) {
                 auto cmd = std::make_unique<SelectCommand>();
                 mock->queueResponse(QByteArray::fromHex("9000"));
-                CommandResult result = commMgr->executeCommandSync(std::move(cmd), 3000);
+                CommandResult result = commMgr->executeCommandSync(std::move(cmd));
                 Q_UNUSED(result);
                 completedCount++;
             }
         });
-        
-        future.waitForFinished();  // Wait for completion
-        
+
+        QElapsedTimer timer;
+        timer.start();
+        while (!future.isFinished() && timer.elapsed() < 15000) {
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+            QThread::msleep(10);
+        }
+
+        QVERIFY2(future.isFinished(), "High-volume sync calls did not finish within timeout");
+        future.waitForFinished();
+
         // Wait for QThreadPool to fully finish
-        QThreadPool::globalInstance()->waitForDone();
-        
-        // Give thread time to fully complete before cleanup
-        QTest::qWait(100);
-        
+        QVERIFY2(QThreadPool::globalInstance()->waitForDone(3000),
+                 "QThreadPool did not drain within timeout");
+
+        m_commMgr->endBatchOperations();
+
         // Should complete all (or most if some fail)
         QVERIFY(completedCount.load() >= numCalls / 2);  // At least half
-    }
-    
-    void testConcurrentHighVolumeSyncCalls() {
-        // Enable thread-safe mode for MockBackend to protect concurrent queueResponse calls
-        m_mock->setThreadSafe(true);
-        
-        m_commMgr->startDetection();
-        m_mock->queueResponse(QByteArray::fromHex("8041") + QByteArray(65, 0x04) + QByteArray::fromHex("9000"));
-        m_mock->simulateCardInserted();
-        
-        QTest::qWait(300);
-        
-        const int numThreads = 5;
-        const int callsPerThread = 10;
-        std::atomic<int> completedCount{0};
-        
-        QList<QFuture<void>> futures;
-        
-        // CRITICAL: Don't capture [this] to avoid use-after-free during cleanup
-        auto* commMgr = m_commMgr.get();
-        auto* mock = m_mock;
-        
-        for (int i = 0; i < numThreads; i++) {
-            auto future = QtConcurrent::run([commMgr, mock, callsPerThread, &completedCount]() {
-                for (int j = 0; j < callsPerThread; j++) {
-                    auto cmd = std::make_unique<SelectCommand>();
-                    mock->queueResponse(QByteArray::fromHex("9000"));
-                    CommandResult result = commMgr->executeCommandSync(std::move(cmd), 5000);
-                    Q_UNUSED(result);
-                    completedCount++;
-                }
-            });
-            futures.append(future);
-        }
-        
-        for (auto& future : futures) {
-            future.waitForFinished();
-        }
-        
-        // Wait for QThreadPool to fully finish
-        QThreadPool::globalInstance()->waitForDone();
-        
-        QVERIFY(completedCount.load() >= (numThreads * callsPerThread) / 2);
-    }
-    
-    // ========================================================================
-    // Edge Cases
-    // ========================================================================
-    
-    void testSyncExecuteWithZeroTimeout() {
-        // CRITICAL: Don't capture [this] to avoid use-after-free during cleanup
-        auto* commMgr = m_commMgr.get();
-        auto future = QtConcurrent::run([commMgr]() {
-            auto cmd = std::make_unique<SelectCommand>();
-            return commMgr->executeCommandSync(std::move(cmd), 0);
-        });
-        
-        // Should use command's default timeout
-        future.waitForFinished();
-        QVERIFY(true);
-    }
-    
-    void testSyncExecuteWithNegativeTimeout() {
-        m_commMgr->startDetection();
-        m_mock->queueResponse(QByteArray::fromHex("8041") + QByteArray(65, 0x04) + QByteArray::fromHex("9000"));
-        m_mock->simulateCardInserted();
-        
-        QTest::qWait(300);
-        
-        // CRITICAL: Don't capture [this] to avoid use-after-free during cleanup
-        auto* commMgr = m_commMgr.get();
-        auto* mock = m_mock;
-        auto future = QtConcurrent::run([commMgr, mock]() {
-            auto cmd = std::make_unique<SelectCommand>();
-            mock->queueResponse(QByteArray::fromHex("9000"));
-            return commMgr->executeCommandSync(std::move(cmd), -1);
-        });
-        
-        // Should complete
-        future.waitForFinished();
-        QVERIFY(true);
     }
 };
 

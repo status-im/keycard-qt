@@ -106,6 +106,12 @@ public:
     virtual void stopDetection() = 0;
 
     /**
+     * @brief Check if detection is active
+     * @return true if detection is active, false otherwise
+     */
+    virtual bool isDetectionActive() const = 0;
+
+    /**
      * @brief Disconnect from the currently connected card/tag
      */
     virtual void disconnect() = 0;
@@ -193,6 +199,14 @@ signals:
      * @brief Emitted when a card/tag is removed or connection lost
      */
     void cardRemoved();
+
+    /**
+     * @brief Emitted when the backend stops target detection
+     *
+     * Used by event-driven waiters that should unblock when detection ends.
+     * @param forced true if detection was forcefully stopped by the user or application
+     */
+    void targetDetectionStopped(bool forced);
 
     /**
      * @brief Emitted when an error occurs

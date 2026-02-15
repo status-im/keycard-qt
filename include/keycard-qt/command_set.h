@@ -319,17 +319,9 @@ public:
     /**
      * @brief Wait for card to be present
      * Checks if card is connected, enables card detection if needed, and waits for card
-     * @param timeoutMs Timeout in milliseconds (default: uses defaultWaitTimeout)
-     * @return true if card detected, false on timeout or error
+     * @return true if card detected, false on error or when detection stops
      */
-    bool waitForCard(int timeoutMs = -1);
-    
-    /**
-     * @brief Set default timeout for waitForCard operations
-     * @param timeoutMs Timeout in milliseconds (default: 60000)
-     * Useful for tests to use shorter timeouts
-     */
-    void setDefaultWaitTimeout(int timeoutMs);
+    bool waitForCard();
 
     /**
      * @brief Ensure pairing is available for current card
@@ -400,6 +392,12 @@ public:
      *       CommunicationManager should use this instead of accessing channel directly.
      */
     void stopDetection();
+
+    /**
+     * @brief Check if detection is active
+     * @return true if detection is active, false otherwise
+     */
+    bool isDetectionActive() const { return m_channel && m_channel->isDetectionActive(); }
     
     /**
      * @brief Get current card UID
@@ -496,10 +494,9 @@ private:
     
     /**
      * @brief Internal implementation of waitForCard (must be called from correct thread)
-     * @param timeoutMs Timeout in milliseconds
-     * @return true if card detected, false on timeout
+     * @return true if card detected, false on error or when detection stops
      */
-    bool waitForCardInternal(int timeoutMs);
+    bool waitForCardInternal();
 
     /**
      * @brief Clean up state after factory reset
@@ -543,8 +540,6 @@ private:
     QString m_cachedPIN;              // Cached PIN for auto-reauth after NFC session loss
     bool m_needsSecureChannelReestablishment = false;  // Flag: secure channel must be re-opened before next command
     
-    // Default timeout for waitForCard operations (can be configured for tests)
-    int m_defaultWaitTimeout = 60000;  // 60 seconds default
 
     std::atomic_bool m_cardReady = false;
 };

@@ -92,6 +92,15 @@ public:
      * Call startDetection() to resume monitoring.
      */
     void stopDetection() override;
+
+    /**
+     * @brief Cancel all pending operations with the given reason
+     * @param reason Error message for cancelled operations (default: "User cancelled NFC")
+     *
+     * Wakes sync waiters, flushes the queue with error results, and stops detection.
+     * Keeps the manager thread alive. Thread-safe: marshals to manager thread if needed.
+     */
+    void cancelPendingOperations(const QString& reason = "User cancelled NFC") override;
     
     /**
      * @brief Stop the communication manager completely
@@ -137,16 +146,15 @@ public:
     /**
      * @brief Execute command synchronously (blocking)
      * @param cmd Command to execute
-     * @param timeoutMs Timeout in milliseconds
      * @return CommandResult with success/failure and data
      * 
      * This is a convenience wrapper around enqueueCommand() that blocks
-     * until the command completes or times out.
+     * until the command completes or the manager is stopped.
      * 
      * IMPORTANT: Do NOT call this from the communication thread or main thread
      * if the main thread needs to process events. Use from worker threads only.
      */
-    CommandResult executeCommandSync(std::unique_ptr<CardCommand> cmd, int timeoutMs = -1) override;
+    CommandResult executeCommandSync(std::unique_ptr<CardCommand> cmd) override;
     
     /**
      * @brief Get current state
@@ -221,6 +229,15 @@ private slots:
      * Allows tracking of channel state for operational state emission.
      */
     void onChannelStateChanged(ChannelState state);
+
+    /**
+     * @brief Handle target detection stopped from channel (user cancelled NFC)
+     *
+     * Emitted when the NFC backend stops detection (e.g., user closed drawer).
+     * Triggers unified cancel cleanup.
+     * @param forced true if detection was forcefully stopped by the user or application
+     */
+    void onTargetDetectionStopped(bool forced);
     
     /**
      * @brief Process next command in queue
@@ -267,6 +284,14 @@ private:
      * @brief Set state and emit signal
      */
     void setState(State newState);
+
+    /**
+     * @brief Internal cancel: wake sync waiters, flush queue, stop detection
+     * @param reason Error message for cancelled operations
+     *
+     * Keeps manager thread alive. Used by cancelPendingOperations() and stop().
+     */
+    void cancelPendingOperationsInternal(const QString& reason);
     
     // Thread and queue management
     CommunicationThread* m_commThread;

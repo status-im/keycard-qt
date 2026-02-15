@@ -48,6 +48,9 @@ KeycardChannel::KeycardChannel(QObject* parent)
         m_targetUid.clear();
         emit targetLost();
     });
+
+    connect(m_backend, &KeycardChannelBackend::targetDetectionStopped,
+            this, &KeycardChannel::targetDetectionStopped);
     
     connect(m_backend, &KeycardChannelBackend::error,
             this, &KeycardChannel::error);
@@ -94,6 +97,9 @@ KeycardChannel::KeycardChannel(KeycardChannelBackend* backend, QObject* parent)
         m_targetUid.clear();
         emit targetLost();
     });
+
+    connect(m_backend, &KeycardChannelBackend::targetDetectionStopped,
+            this, &KeycardChannel::targetDetectionStopped);
     
     connect(m_backend, &KeycardChannelBackend::error,
             this, &KeycardChannel::error);
@@ -137,6 +143,14 @@ void KeycardChannel::stopDetection()
     } else {
         qWarning() << "KeycardChannel: No backend available!";
     }
+}
+
+bool KeycardChannel::isDetectionActive() const
+{
+    if (m_backend) {
+        return m_backend->isDetectionActive();
+    }
+    return false;
 }
 
 void KeycardChannel::forceScan()
