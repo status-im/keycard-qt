@@ -107,8 +107,8 @@ bool CommunicationManager::startDetection() {
     qDebug() << "CommunicationManager: Starting card detection...";
     QMetaObject::invokeMethod(m_commandSet.get(),
                                &CommandSet::startDetection,
-                               Qt::QueuedConnection);
-    
+                               Qt::AutoConnection);
+
     qDebug() << "CommunicationManager: Card detection started via CommandSet";
     return true;
 }
@@ -121,8 +121,8 @@ void CommunicationManager::stopDetection() {
     qDebug() << "CommunicationManager: Stopping card detection...";
     QMetaObject::invokeMethod(m_commandSet.get(),
                                &CommandSet::stopDetection,
-                               Qt::QueuedConnection);
-    
+                               Qt::AutoConnection);
+
     qDebug() << "CommunicationManager: Card detection stopped via CommandSet";
 }
 
@@ -330,8 +330,8 @@ QUuid CommunicationManager::enqueueCommand(std::unique_ptr<CardCommand> cmd) {
     if (m_commandSet && m_commandSet->isCardReady() && state() == State::Ready) {
         QMetaObject::invokeMethod(this, &CommunicationManager::processQueue,
                                 Qt::QueuedConnection);
-    }
-    else {
+    } else if (!m_commandSet || !m_commandSet->isCardReady()) {
+        // No need to start detection if card is absent or not ready
         startDetection();
     }
     

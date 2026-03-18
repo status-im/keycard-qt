@@ -41,13 +41,13 @@ KeycardChannel::KeycardChannel(QObject* parent)
             this, [this](const QString& uid) {
         m_targetUid = uid;
         emit targetDetected(uid);
-    });
-    
+    }, Qt::DirectConnection);
+
     connect(m_backend, &KeycardChannelBackend::cardRemoved,
             this, [this]() {
         m_targetUid.clear();
         emit targetLost();
-    });
+    }, Qt::DirectConnection);
 
     connect(m_backend, &KeycardChannelBackend::targetDetectionStopped,
             this, &KeycardChannel::targetDetectionStopped);
@@ -90,13 +90,13 @@ KeycardChannel::KeycardChannel(KeycardChannelBackend* backend, QObject* parent)
             this, [this](const QString& uid) {
         m_targetUid = uid;
         emit targetDetected(uid);
-    });
-    
+    }, Qt::DirectConnection);
+
     connect(m_backend, &KeycardChannelBackend::cardRemoved,
             this, [this]() {
         m_targetUid.clear();
         emit targetLost();
-    });
+    }, Qt::DirectConnection);
 
     connect(m_backend, &KeycardChannelBackend::targetDetectionStopped,
             this, &KeycardChannel::targetDetectionStopped);
