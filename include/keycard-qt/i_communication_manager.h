@@ -6,6 +6,7 @@
 #include "command_set.h"
 #include <QObject>
 #include <QString>
+#include <QByteArray>
 #include <memory>
 
 namespace Keycard {
@@ -19,18 +20,23 @@ struct CardInitializationResult {
     QString uid;  // Card UID
     ApplicationInfo appInfo;
     ApplicationStatus appStatus;
-    
-    CardInitializationResult() : success(false) {}
-    
-    static CardInitializationResult fromSuccess(const QString& cardUid, const ApplicationInfo& info, const ApplicationStatus& status) {
+    QByteArray metadataTlv; // The caller should parse the metadataTlv, since the binary format is project-specific.
+    bool hasMetadata;
+
+    CardInitializationResult() : success(false), hasMetadata(false) {}
+
+    static CardInitializationResult fromSuccess(const QString& cardUid, const ApplicationInfo& info, const ApplicationStatus& status,
+                                                const QByteArray& metadata = QByteArray(), bool metadataAvailable = false) {
         CardInitializationResult result;
         result.success = true;
         result.uid = cardUid;
         result.appInfo = info;
         result.appStatus = status;
+        result.metadataTlv = metadata;
+        result.hasMetadata = metadataAvailable;
         return result;
     }
-    
+
     static CardInitializationResult fromError(const QString& err) {
         CardInitializationResult result;
         result.success = false;

@@ -620,11 +620,24 @@ CardInitializationResult CommunicationManager::initializeCardSequence() {
     
     // STEP 5: Get metadata (optional - don't fail if this errors)
     qDebug() << "   [5/5] Get metadata (optional)...";
-    // We could add metadata fetching here if needed
-    
+    QByteArray metadataTlv;
+    bool hasMetadata = false;
+    // GET_DATA with P1=0x00 (P1StoreDataPublic) returns the public metadata blob.
+    // The secure channel is already open from STEP 3, so this is a single APDU.
+    // An empty / status-only response means the card simply has no metadata yet,
+    // which is not an error (matching the behaviour of GetMetadataCommand).
+    metadataTlv = m_commandSet->getData(0x00);
+    if (!metadataTlv.isEmpty() && metadataTlv.size() > 2) {
+        hasMetadata = true;
+        qDebug() << "   Metadata fetched, size:" << metadataTlv.size();
+    } else {
+        qDebug() << "   No metadata on card (or empty response)";
+        metadataTlv.clear();
+    }
+
     qDebug() << "CommunicationManager::initializeCardSequence() - COMPLETED SUCCESSFULLY";
-    
-    return CardInitializationResult::fromSuccess(m_currentCardUID, appInfo, appStatus);
+
+    return CardInitializationResult::fromSuccess(m_currentCardUID, appInfo, appStatus, metadataTlv, hasMetadata);
 }
 
 // ============================================================================
