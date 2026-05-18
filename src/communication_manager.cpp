@@ -597,9 +597,12 @@ CardInitializationResult CommunicationManager::initializeCardSequence() {
         if (error.isEmpty()) {
             error = "Failed to ensure pairing";
         }
-        return CardInitializationResult::fromError(error);
+        // SELECT succeeded — forward appInfo so callers can still see instanceUID,
+        // version, availableSlots, and keyUID (e.g. for the no-available-pairing-slots
+        // case where the card identity is known but no session can be opened).
+        return CardInitializationResult::fromError(error, appInfo);
     }
-    
+
     // STEP 3: Open secure channel
     qDebug() << "   [3/5] Open secure channel...";
     if (!m_commandSet->ensureSecureChannel()) {
@@ -607,7 +610,7 @@ CardInitializationResult CommunicationManager::initializeCardSequence() {
         if (error.isEmpty()) {
             error = "Failed to open secure channel";
         }
-        return CardInitializationResult::fromError(error);
+        return CardInitializationResult::fromError(error, appInfo);
     }
     
     // STEP 4: Get status

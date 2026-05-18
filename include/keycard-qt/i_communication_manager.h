@@ -37,10 +37,17 @@ struct CardInitializationResult {
         return result;
     }
 
-    static CardInitializationResult fromError(const QString& err) {
+    // appInfo/appStatus may be passed when SELECT has already succeeded but a later
+    // step (pairing, secure channel) failed — so the caller can still expose
+    // SELECT-derived fields (instanceUID, version, availableSlots, keyUID).
+    static CardInitializationResult fromError(const QString& err,
+                                              const ApplicationInfo& info = ApplicationInfo(),
+                                              const ApplicationStatus& status = ApplicationStatus()) {
         CardInitializationResult result;
         result.success = false;
         result.error = err;
+        result.appInfo = info;
+        result.appStatus = status;
         return result;
     }
 };
