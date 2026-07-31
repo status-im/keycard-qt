@@ -3,6 +3,7 @@
 #include <QFuture>
 #include <QThreadPool>
 #include <QDateTime>
+#include <QSignalSpy>
 #include "keycard-qt/communication_manager.h"
 #include "keycard-qt/command_set.h"
 #include "keycard-qt/keycard_channel.h"
@@ -137,8 +138,14 @@ private slots:
         // Enable thread-safe mode for MockBackend to protect concurrent queueResponse calls
         m_mock->setThreadSafe(true);
         
-        m_commMgr->startDetection();
+        QSignalSpy initializedSpy(m_commMgr.get(), &CommunicationManager::cardInitialized);
         m_mock->queueResponse(TestCommunicationManagerSync::validCardSelectResponse());
+        m_commMgr->startDetection();
+
+        // Finish asynchronous card detection and initialization before testing
+        // concurrent synchronous calls. Otherwise this test also depends on
+        // platform-specific event-loop and thread-pool scheduling.
+        QTRY_COMPARE_WITH_TIMEOUT(initializedSpy.count(), 1, 5000);
         
         const int numThreads = 3;
         std::atomic<int> successCount{0};

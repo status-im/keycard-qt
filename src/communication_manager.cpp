@@ -327,11 +327,10 @@ QUuid CommunicationManager::enqueueCommand(std::unique_ptr<CardCommand> cmd) {
         m_queueNotEmpty.wakeAll();
     }
 
-    if (m_commandSet && m_commandSet->isCardReady() && state() == State::Ready) {
+    if (m_commandSet && m_commandSet->isCardReady()) {
         QMetaObject::invokeMethod(this, &CommunicationManager::processQueue,
                                 Qt::QueuedConnection);
-    }
-    else {
+    } else {
         startDetection();
     }
     
@@ -696,10 +695,17 @@ void CommunicationManager::processQueue() {
     // When card is detected, CommandSet will emit cardReady() which triggers onCardReady()
     // onCardReady() will initialize and then call processQueue() again
     if (currentState == State::Idle) {
-        qDebug() << "CommunicationManager: Card not ready yet, waiting...";
-        qDebug() << "CommunicationManager: Waiting for cardReady signal from CommandSet";
-        // Don't process yet - wait for card detection
-        return;
+        if (m_commandSet && m_commandSet->isCardReady()) {
+            // The queue may have previously drained and moved the manager to
+            // Idle without disconnecting the card. Resume processing instead
+            // of restarting detection and waiting for a duplicate cardReady.
+            currentState = State::Ready;
+        } else {
+            qDebug() << "CommunicationManager: Card not ready yet, waiting...";
+            qDebug() << "CommunicationManager: Waiting for cardReady signal from CommandSet";
+            // Don't process yet - wait for card detection
+            return;
+        }
     }
     
     // Get next command
