@@ -422,12 +422,6 @@ bool CommandSet::init(const Secrets& secrets)
         qWarning() << m_lastError;
         return false;
     }
-    
-    if (secrets.pairingPassword.length() < 5) {
-        m_lastError = "Pairing password must be at least 5 characters";
-        qWarning() << m_lastError;
-        return false;
-    }
 
     auto appInfo = select();
     if (!m_appInfo.installed) {
