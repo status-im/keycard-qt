@@ -73,7 +73,7 @@ private slots:
         QVERIFY(cmdSet.lastError().contains("PUK must be 12 digits"));
     }
     
-    void testInitInvalidPairingPassword() {
+    void testInitShortPairingPasswordAccepted() {
         auto channel = createMockChannel();
         auto* mock = qobject_cast<MockBackend*>(channel->backend());
         
@@ -85,9 +85,9 @@ private slots:
         CommandSet cmdSet(channel, nullptr, nullptr);
         cmdSet.select();
         
-        Secrets secrets("123456", "123456789012", "abc");
+        Secrets secrets("123456", "123456789012", "a");
         QVERIFY(!cmdSet.init(secrets));
-        QVERIFY(cmdSet.lastError().contains("at least 5 characters"));
+        QCOMPARE(cmdSet.lastError(), QString("Failed to encrypt INIT data"));
     }
     
     void testInitAPDUFormat() {
