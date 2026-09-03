@@ -198,6 +198,13 @@ namespace APDU {
     constexpr uint8_t P1FactoryResetMagic = 0xAA;
     
     // P2 parameters
+    // SIGN P2 = algorithm (https://docs.keycard.tech/en/developers/apdu/sign).
+    // Applet 3.2 implements ECDSA (0x00) and BIP340 Schnorr (0x03); Ed25519/BLS return SW=6A81.
+    constexpr uint8_t P2SignECDSA = 0x00;
+    constexpr uint8_t P2SignEdDSAEd25519 = 0x01;
+    constexpr uint8_t P2SignBLS12_381 = 0x02;
+    constexpr uint8_t P2SignBIP340Schnorr = 0x03;
+
     constexpr uint8_t P2ExportKeyPrivateAndPublic = 0x00;  // Export both private and public key
     constexpr uint8_t P2ExportKeyPublicOnly = 0x01;        // Export public key only
     constexpr uint8_t P2ExportKeyExtendedPublic = 0x02;    // Export extended public key (with chain code) - FIXED: was 0x03

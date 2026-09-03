@@ -736,7 +736,7 @@ QByteArray CommandSet::sign(const QByteArray& data)
         return QByteArray();
     }
     
-    APDU::Command cmd = buildCommand(APDU::INS_SIGN, APDU::P1SignCurrentKey, 1, data);
+    APDU::Command cmd = buildCommand(APDU::INS_SIGN, APDU::P1SignCurrentKey, APDU::P2SignECDSA, data);
     APDU::Response resp = send(cmd, true);
     
     if (!checkOK(resp)) {
@@ -771,7 +771,7 @@ QByteArray CommandSet::signWithPath(const QByteArray& data, const QString& path,
     // Concatenate data + path
     QByteArray cmdData = data + pathData;
     
-    APDU::Command cmd = buildCommand(APDU::INS_SIGN, p1, 1, cmdData);
+    APDU::Command cmd = buildCommand(APDU::INS_SIGN, p1, APDU::P2SignECDSA, cmdData);
     APDU::Response resp = send(cmd, true);
     
     if (!checkOK(resp)) {
@@ -805,7 +805,7 @@ QByteArray CommandSet::signWithPathFullResponse(const QByteArray& data, const QS
     // Concatenate data + path
     QByteArray cmdData = data + pathData;
     
-    APDU::Command cmd = buildCommand(APDU::INS_SIGN, p1, 1, cmdData);
+    APDU::Command cmd = buildCommand(APDU::INS_SIGN, p1, APDU::P2SignECDSA, cmdData);
     APDU::Response resp = send(cmd, true);
     
     if (!checkOK(resp)) {
@@ -827,7 +827,7 @@ QByteArray CommandSet::signPinless(const QByteArray& data)
         return QByteArray();
     }
     
-    APDU::Command cmd = buildCommand(APDU::INS_SIGN, APDU::P1SignPinless, 1, data);
+    APDU::Command cmd = buildCommand(APDU::INS_SIGN, APDU::P1SignPinless, APDU::P2SignECDSA, data);
     APDU::Response resp = send(cmd, true);
     
     if (!checkOK(resp)) {

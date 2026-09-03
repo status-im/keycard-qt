@@ -209,6 +209,10 @@ private slots:
     
     void testAPDUP2Parameters() {
         // Test actual APDU P2 parameter values from types.h
+        QCOMPARE(APDU::P2SignECDSA, static_cast<uint8_t>(0x00));
+        QCOMPARE(APDU::P2SignEdDSAEd25519, static_cast<uint8_t>(0x01));
+        QCOMPARE(APDU::P2SignBLS12_381, static_cast<uint8_t>(0x02));
+        QCOMPARE(APDU::P2SignBIP340Schnorr, static_cast<uint8_t>(0x03));
         QCOMPARE(APDU::P2ExportKeyPrivateAndPublic, static_cast<uint8_t>(0x00));  // Export both keys
         QCOMPARE(APDU::P2ExportKeyPublicOnly, static_cast<uint8_t>(0x01));        // Export public only
         QCOMPARE(APDU::P2ExportKeyExtendedPublic, static_cast<uint8_t>(0x02));    // Export extended public

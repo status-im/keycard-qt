@@ -26,6 +26,23 @@ private:
         mock->simulateCardInserted();
         return channel;
     }
+
+    void injectSecureChannel(CommandSet& cmd) {
+        PairingInfo pairingInfo(QByteArray(32, 0xAB), 1);
+        cmd.testInjectSecureChannelState(pairingInfo,
+                                         QByteArray(16, 0x00),
+                                         QByteArray(16, 0xEE),
+                                         QByteArray(16, 0xDD));
+    }
+
+    void assertTransmittedSignP2Ecdsa(const QByteArray& apdu, uint8_t expectedP1) {
+        QVERIFY2(apdu.size() >= 4, "SIGN APDU header is CLA INS P1 P2");
+        QCOMPARE(static_cast<uint8_t>(apdu.at(1)), APDU::INS_SIGN);
+        QCOMPARE(static_cast<uint8_t>(apdu.at(2)), expectedP1);
+        // Literal 0x00: ECDSA. Do not compare to P2SignECDSA alone — that would
+        // still pass if both the constant and the APDU reverted to Ed25519 (0x01).
+        QCOMPARE(static_cast<uint8_t>(apdu.at(3)), static_cast<uint8_t>(0x00));
+    }
     
     
 private slots:
@@ -361,6 +378,38 @@ private slots:
         QByteArray hash(32, 0x12);
         QByteArray result = cmd.signPinless(hash);
         QVERIFY(result.isEmpty());
+    }
+
+    void testSignCommandsTransmitEcdsaP2() {
+        auto channel = createMockChannel();
+        auto* mock = qobject_cast<MockBackend*>(channel->backend());
+        CommandSet cmd(channel, nullptr, nullptr);
+        injectSecureChannel(cmd);
+        mock->simulateCardInserted();
+        QTRY_VERIFY(channel->isConnected());
+
+        const QByteArray hash(32, 0x12);
+        const QString path = QStringLiteral("m/44'/60'/0'/0/0");
+
+        mock->queueResponse(QByteArray::fromHex("9000"));
+        cmd.sign(hash);
+        assertTransmittedSignP2Ecdsa(mock->getLastTransmittedApdu(), APDU::P1SignCurrentKey);
+
+        mock->queueResponse(QByteArray::fromHex("9000"));
+        cmd.signWithPath(hash, path, false);
+        assertTransmittedSignP2Ecdsa(mock->getLastTransmittedApdu(), APDU::P1SignDerive);
+
+        mock->queueResponse(QByteArray::fromHex("9000"));
+        cmd.signWithPath(hash, path, true);
+        assertTransmittedSignP2Ecdsa(mock->getLastTransmittedApdu(), APDU::P1SignDeriveAndMakeCurrent);
+
+        mock->queueResponse(QByteArray::fromHex("9000"));
+        cmd.signWithPathFullResponse(hash, path, false);
+        assertTransmittedSignP2Ecdsa(mock->getLastTransmittedApdu(), APDU::P1SignDerive);
+
+        mock->queueResponse(QByteArray::fromHex("9000"));
+        cmd.signPinless(hash);
+        assertTransmittedSignP2Ecdsa(mock->getLastTransmittedApdu(), APDU::P1SignPinless);
     }
     
     void testSetPinlessPath() {
