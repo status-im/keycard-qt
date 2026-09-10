@@ -2,6 +2,9 @@
 #include "keycard-qt/command_set.h"
 #include "keycard-qt/keycard_channel.h"
 #include "mocks/mock_backend.h"
+#include <QCryptographicHash>
+#include <QMessageAuthenticationCode>
+#include <QVector>
 #include <memory>
 
 using namespace Keycard;
@@ -24,6 +27,57 @@ private:
         auto channel = std::make_shared<KeycardChannel>(mock);
         mock->simulateCardInserted();
         return channel;
+    }
+
+    QByteArray validSelectResponse() const {
+        const QByteArray publicKey = QByteArray::fromHex(
+            "0479be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+            "483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8");
+        QByteArray body;
+        body.append(QByteArray::fromHex("8f10"));
+        body.append(QByteArray(16, 0x11));
+        body.append(QByteArray::fromHex("8041"));
+        body.append(publicKey);
+        body.append(QByteArray::fromHex("0202030202010a8d013f"));
+
+        QByteArray response;
+        response.append(static_cast<char>(0xA4));
+        response.append(static_cast<char>(body.size()));
+        response.append(body);
+        response.append(QByteArray::fromHex("9000"));
+        return response;
+    }
+
+    QByteArray openSecureChannelResponse() const {
+        return QByteArray(32, 0x22) + QByteArray(16, 0x33) + QByteArray::fromHex("9000");
+    }
+
+    int countTransmittedInstruction(uint8_t instruction) const {
+        int count = 0;
+        for (const QByteArray& apdu : m_mock->getTransmittedApdus()) {
+            if (apdu.size() >= 2 && static_cast<uint8_t>(apdu.at(1)) == instruction) {
+                ++count;
+            }
+        }
+        return count;
+    }
+
+    QByteArray derivePairingToken(const QString& password) const {
+        const QByteArray passwordBytes = password.toUtf8();
+        QByteArray blockData("Keycard Pairing Password Salt");
+        blockData.append(QByteArray::fromHex("00000001"));
+
+        QByteArray u = QMessageAuthenticationCode::hash(
+            blockData, passwordBytes, QCryptographicHash::Sha256);
+        QByteArray result = u;
+        for (int i = 1; i < 50000; ++i) {
+            u = QMessageAuthenticationCode::hash(
+                u, passwordBytes, QCryptographicHash::Sha256);
+            for (int j = 0; j < result.size(); ++j) {
+                result[j] = result[j] ^ u[j];
+            }
+        }
+        return result;
     }
     
     std::shared_ptr<KeycardChannel> m_channel;
@@ -78,6 +132,45 @@ private slots:
         QVERIFY(!result.isValid());
         QVERIFY(m_cmdSet->lastError().contains("Invalid pair response size"));
     }
+
+    void testPersistentPairingModeIsOnlyUsedForFirstStep() {
+        m_mock->queueResponse(validSelectResponse());
+        QVERIFY(m_cmdSet->select().initialized);
+
+        const QString password = QStringLiteral("test-password");
+        const QByteArray pairingToken = derivePairingToken(password);
+        const QByteArray cardChallenge(32, 0x33);
+        QVector<uint8_t> pairingP2Values;
+
+        m_mock->setResponseHandler(
+            [&](const QByteArray& apdu) {
+                if (apdu.size() < 5
+                    || static_cast<uint8_t>(apdu.at(1)) != APDU::INS_PAIR) {
+                    return QByteArray::fromHex("6d00");
+                }
+
+                pairingP2Values.append(static_cast<uint8_t>(apdu.at(3)));
+                const uint8_t p1 = static_cast<uint8_t>(apdu.at(2));
+                if (p1 == APDU::P1PairFirstStep) {
+                    const int dataLength = static_cast<uint8_t>(apdu.at(4));
+                    const QByteArray challenge = apdu.mid(5, dataLength);
+                    QCryptographicHash hash(QCryptographicHash::Sha256);
+                    hash.addData(pairingToken);
+                    hash.addData(challenge);
+                    return hash.result() + cardChallenge + QByteArray::fromHex("9000");
+                }
+
+                return QByteArray(1, 0) + QByteArray(32, 0x44)
+                    + QByteArray::fromHex("9000");
+            });
+
+        const PairingInfo pairing = m_cmdSet->pair(password);
+
+        QVERIFY(pairing.isValid());
+        QCOMPARE(pairingP2Values.size(), 2);
+        QCOMPARE(pairingP2Values.at(0), APDU::P2PairPersistent);
+        QCOMPARE(pairingP2Values.at(1), static_cast<uint8_t>(0));
+    }
     
     void testOpenSecureChannelInvalidPairing() {
         PairingInfo invalidPairing;
@@ -97,6 +190,46 @@ private slots:
         
         QVERIFY(!result);
         QVERIFY(!m_cmdSet->lastError().isEmpty());
+    }
+
+    void testSelectClosesAndNextProtectedCommandReopensSecureChannel() {
+        m_mock->queueResponse(validSelectResponse());
+        QVERIFY(m_cmdSet->select().initialized);
+
+        const PairingInfo pairing(QByteArray(32, 0x44), 0);
+        m_cmdSet->testInjectSecureChannelState(
+            pairing, QByteArray(16, 0x55), QByteArray(32, 0x66), QByteArray(32, 0x77));
+        QVERIFY(m_cmdSet->testSecureChannelIsOpen());
+
+        m_mock->queueResponse(validSelectResponse());
+        QVERIFY(m_cmdSet->select(true).initialized);
+        QVERIFY(!m_cmdSet->testSecureChannelIsOpen());
+
+        m_mock->queueResponse(openSecureChannelResponse());
+        m_mock->queueResponse(QByteArray::fromHex("9000"));
+        m_mock->queueResponse(QByteArray::fromHex("9000"));
+        m_mock->queueResponse(QByteArray::fromHex("9000"));
+        m_mock->queueResponse(QByteArray::fromHex("9000"));
+
+        QVERIFY(m_cmdSet->verifyPIN(QStringLiteral("123456")));
+        QVERIFY(m_cmdSet->testSecureChannelIsOpen());
+        QCOMPARE(countTransmittedInstruction(APDU::INS_OPEN_SECURE_CHANNEL), 1);
+    }
+
+    void testOpenSecureChannelRetriesAfterMutualAuthenticationFailure() {
+        m_mock->queueResponse(validSelectResponse());
+        QVERIFY(m_cmdSet->select().initialized);
+
+        const PairingInfo pairing(QByteArray(32, 0x44), 0);
+        m_mock->queueResponse(openSecureChannelResponse());
+        m_mock->queueResponse(QByteArray::fromHex("6982"));
+        m_mock->queueResponse(openSecureChannelResponse());
+        m_mock->queueResponse(QByteArray::fromHex("9000"));
+        m_mock->queueResponse(QByteArray::fromHex("9000"));
+
+        QVERIFY(m_cmdSet->openSecureChannel(pairing));
+        QVERIFY(m_cmdSet->testSecureChannelIsOpen());
+        QCOMPARE(countTransmittedInstruction(APDU::INS_OPEN_SECURE_CHANNEL), 2);
     }
     
     void testGetStatusWithoutSecureChannel() {
