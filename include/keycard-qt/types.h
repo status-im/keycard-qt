@@ -171,6 +171,7 @@ namespace APDU {
     
     constexpr uint8_t P1PairFirstStep = 0x00;
     constexpr uint8_t P1PairFinalStep = 0x01;
+    constexpr uint8_t P2PairPersistent = 0x02;
     
     constexpr uint8_t P1ChangePinPIN = 0x00;
     constexpr uint8_t P1ChangePinPUK = 0x01;

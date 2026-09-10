@@ -71,7 +71,20 @@ bool SecureChannel::generateSecret(const QByteArray& cardPublicKey)
         qWarning() << "SecureChannel: Invalid card public key format (expected 65 bytes starting with 0x04)";
         return false;
     }
-    
+
+    QMutexLocker locker(&m_secureMutex);
+
+    if (d->privateKey) {
+        EVP_PKEY_free(d->privateKey);
+        d->privateKey = nullptr;
+    }
+    if (d->cardPublicKey) {
+        EVP_PKEY_free(d->cardPublicKey);
+        d->cardPublicKey = nullptr;
+    }
+    d->secret.clear();
+    d->rawPublicKeyData.clear();
+
     // Step 1: Generate our ephemeral EC key pair (secp256k1)
     EVP_PKEY_CTX* pctx = EVP_PKEY_CTX_new_id(EVP_PKEY_EC, nullptr);
     if (!pctx) {
@@ -181,14 +194,21 @@ bool SecureChannel::generateSecret(const QByteArray& cardPublicKey)
     }
     
     // Derive the shared secret
-    d->secret.resize(static_cast<int>(secret_len));
-    if (EVP_PKEY_derive(ctx, reinterpret_cast<unsigned char*>(d->secret.data()), 
+    if (secret_len != 32) {
+        qWarning() << "SecureChannel: Unexpected shared secret length" << secret_len;
+        EVP_PKEY_CTX_free(ctx);
+        return false;
+    }
+
+    d->secret.resize(32);
+    if (EVP_PKEY_derive(ctx, reinterpret_cast<unsigned char*>(d->secret.data()),
                        &secret_len) <= 0) {
         qWarning() << "SecureChannel: Failed to derive shared secret";
         EVP_PKEY_CTX_free(ctx);
         return false;
     }
-    
+    d->secret.resize(static_cast<int>(secret_len));
+
     EVP_PKEY_CTX_free(ctx);
     
     return true;
@@ -198,10 +218,11 @@ bool SecureChannel::generateSecret(const QByteArray& cardPublicKey)
 void SecureChannel::init(const QByteArray& iv, const QByteArray& encKey, const QByteArray& macKey)
 {
     qDebug() << "SecureChannel::init()";
-    
+    QMutexLocker locker(&m_secureMutex);
+
     // Go's DeriveSessionKeys returns encKey (32 bytes) and macKey (32 bytes)
     // Both use AES-256
-    d->iv = iv;
+    d->iv = iv.left(16);
     d->encKey = encKey;  // Full 32 bytes for AES-256
     d->macKey = macKey;  // Full 32 bytes for AES-256
     d->open = true;
@@ -211,6 +232,7 @@ void SecureChannel::init(const QByteArray& iv, const QByteArray& encKey, const Q
 void SecureChannel::reset()
 {
     qDebug() << "SecureChannel::reset()";
+    QMutexLocker locker(&m_secureMutex);
     // Clear session keys
     d->iv.clear();
     d->encKey.clear();

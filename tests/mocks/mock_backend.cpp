@@ -68,6 +68,11 @@ void MockBackend::setDefaultResponse(const QByteArray& response)
     m_defaultResponse = response;
 }
 
+void MockBackend::setResponseHandler(std::function<QByteArray(const QByteArray&)> handler)
+{
+    m_responseHandler = std::move(handler);
+}
+
 void MockBackend::startDetection()
 {
     if (m_detecting) {
@@ -157,7 +162,9 @@ QByteArray MockBackend::transmit(const QByteArray& apdu)
 
     // Get response from queue or use default
     QByteArray response;
-    if (!m_responseQueue.isEmpty()) {
+    if (m_responseHandler) {
+        response = m_responseHandler(apdu);
+    } else if (!m_responseQueue.isEmpty()) {
         response = m_responseQueue.dequeue();
     } else {
         response = m_defaultResponse;
@@ -282,6 +289,7 @@ void MockBackend::reset()
 
     // Clear queues and tracking
     m_responseQueue.clear();
+    m_responseHandler = {};
     m_transmittedApdus.clear();
     m_nextThrowMessage.clear();
 
