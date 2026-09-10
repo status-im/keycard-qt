@@ -2,6 +2,8 @@
 #include "keycard-qt/secure_channel.h"
 #include "keycard-qt/channel_interface.h"
 #include "keycard-qt/apdu/command.h"
+#include <atomic>
+#include <thread>
 
 using namespace Keycard;
 
@@ -271,6 +273,34 @@ private slots:
             secChan->reset();
             QVERIFY(!secChan->isOpen());
         }
+    }
+
+    void testConcurrentGenerateSecretAndReset() {
+        const QByteArray cardPublicKey = QByteArray::fromHex(
+            "0479be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+            "483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8");
+        if (!secChan->generateSecret(cardPublicKey)) {
+            QSKIP("OpenSSL secure channel support is not available");
+        }
+
+        std::atomic<bool> generationFailed{false};
+        std::thread generator([&]() {
+            for (int i = 0; i < 100; ++i) {
+                if (!secChan->generateSecret(cardPublicKey)) {
+                    generationFailed = true;
+                    return;
+                }
+            }
+        });
+        std::thread resetter([&]() {
+            for (int i = 0; i < 100; ++i) {
+                secChan->reset();
+            }
+        });
+
+        generator.join();
+        resetter.join();
+        QVERIFY(!generationFailed.load());
     }
 };
 

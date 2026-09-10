@@ -369,6 +369,11 @@ public:
         m_pairingBoundInstanceUID = m_cardInstanceUID;
         m_secureChannel->init(iv, encKey, macKey);
     }
+    bool testSecureChannelIsOpen() const {
+        return m_secureChannel && m_secureChannel->isOpen();
+    }
+    bool testWasAuthenticated() const { return m_wasAuthenticated; }
+    bool testHasCachedStatus() const { return m_hasCachedStatus; }
     #endif
     
     // ========== Channel Management API  ==========

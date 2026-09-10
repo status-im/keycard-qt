@@ -8,6 +8,7 @@
 #include <QTimer>
 #include <QQueue>
 #include <QMutex>
+#include <functional>
 
 namespace Keycard {
 namespace Test {
@@ -88,6 +89,7 @@ public:
      * @param response Default APDU response
      */
     void setDefaultResponse(const QByteArray& response);
+    void setResponseHandler(std::function<QByteArray(const QByteArray&)> handler);
 
     /**
      * @brief Enable/disable logging of transmitted APDUs
@@ -227,6 +229,7 @@ private:
     // Response queue
     QQueue<QByteArray> m_responseQueue;
     QByteArray m_defaultResponse;
+    std::function<QByteArray(const QByteArray&)> m_responseHandler;
 
     // Tracking
     QList<QByteArray> m_transmittedApdus;
