@@ -209,6 +209,7 @@ private slots:
     
     void testAPDUP2Parameters() {
         // Test actual APDU P2 parameter values from types.h
+        QCOMPARE(APDU::P2PairPersistent, static_cast<uint8_t>(0x02));
         QCOMPARE(APDU::P2SignECDSA, static_cast<uint8_t>(0x00));
         QCOMPARE(APDU::P2SignEdDSAEd25519, static_cast<uint8_t>(0x01));
         QCOMPARE(APDU::P2SignBLS12_381, static_cast<uint8_t>(0x02));

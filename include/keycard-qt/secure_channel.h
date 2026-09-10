@@ -6,6 +6,7 @@
 #include <QByteArray>
 #include <QSharedPointer>
 #include <QMutex>
+#include <QRecursiveMutex>
 
 
 namespace Keycard {
@@ -99,11 +100,7 @@ private:
     struct Private;
     QSharedPointer<Private> d;
     
-    // Thread safety - protects IV state during command encryption/transmission
-    // Critical because IV is updated after each send() and multiple threads
-    // may call CommandSet methods simultaneously (e.g. getStatus from UI thread
-    // while authorize runs on worker thread)
-    mutable QMutex m_secureMutex;
+    mutable QRecursiveMutex m_secureMutex;
     
     // Helper methods
     QByteArray calculateMAC(const QByteArray& meta, const QByteArray& data);
