@@ -338,12 +338,12 @@ bool CommandSet::openSecureChannel(const PairingInfo& pairingInfo)
 
     bool opened = false;
     for (int attempt = 0; attempt < 2 && !opened; ++attempt) {
-        if (attempt == 1) {
-            if (m_appInfo.secureChannelPublicKey.isEmpty()
-                || !m_secureChannel->generateSecret(m_appInfo.secureChannelPublicKey)) {
-                failOpen(QStringLiteral("Failed to regenerate ECDH secret"));
-                break;
-            }
+        // Never reuse the INIT one-shot ECDH (or a previous OPEN_SC ephemeral)
+        // for OPEN_SC: the card accepts OPEN_SC then fails MA with SW=6982.
+        if (m_appInfo.secureChannelPublicKey.isEmpty()
+            || !m_secureChannel->generateSecret(m_appInfo.secureChannelPublicKey)) {
+            failOpen(QStringLiteral("Failed to generate ECDH secret"));
+            break;
         }
 
         QByteArray data = m_secureChannel->rawPublicKey();
@@ -440,7 +440,7 @@ bool CommandSet::init(const Secrets& secrets)
         return false;
     }
 
-    auto appInfo = select();
+    auto appInfo = select(true);
     if (!m_appInfo.installed) {
         qWarning() << "CommandSet::init(): Failed to select applet";
         m_lastError = "Failed to select applet";

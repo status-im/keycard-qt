@@ -62,6 +62,18 @@ private:
         return count;
     }
 
+    QByteArrayList transmittedOpenSecureChannelKeys() const {
+        QByteArrayList keys;
+        for (const QByteArray& apdu : m_mock->getTransmittedApdus()) {
+            if (apdu.size() < 5 || static_cast<uint8_t>(apdu.at(1)) != APDU::INS_OPEN_SECURE_CHANNEL) {
+                continue;
+            }
+            const int dataLength = static_cast<uint8_t>(apdu.at(4));
+            keys.append(apdu.mid(5, dataLength));
+        }
+        return keys;
+    }
+
     QByteArray derivePairingToken(const QString& password) const {
         const QByteArray passwordBytes = password.toUtf8();
         QByteArray blockData("Keycard Pairing Password Salt");
@@ -230,6 +242,28 @@ private slots:
         QVERIFY(m_cmdSet->openSecureChannel(pairing));
         QVERIFY(m_cmdSet->testSecureChannelIsOpen());
         QCOMPARE(countTransmittedInstruction(APDU::INS_OPEN_SECURE_CHANNEL), 2);
+    }
+
+    void testOpenSecureChannelUsesAFreshEcdhSecret() {
+        m_mock->queueResponse(validSelectResponse());
+        QVERIFY(m_cmdSet->select().initialized);
+
+        const PairingInfo pairing(QByteArray(32, 0x44), 0);
+        m_mock->queueResponse(openSecureChannelResponse());
+        m_mock->queueResponse(QByteArray::fromHex("9000"));
+        m_mock->queueResponse(QByteArray::fromHex("9000"));
+        m_mock->queueResponse(openSecureChannelResponse());
+        m_mock->queueResponse(QByteArray::fromHex("9000"));
+        m_mock->queueResponse(QByteArray::fromHex("9000"));
+
+        QVERIFY(m_cmdSet->openSecureChannel(pairing));
+        QVERIFY(m_cmdSet->openSecureChannel(pairing));
+
+        const QByteArrayList keys = transmittedOpenSecureChannelKeys();
+        QCOMPARE(keys.size(), 2);
+        QCOMPARE(keys.at(0).size(), 65);
+        QCOMPARE(keys.at(1).size(), 65);
+        QVERIFY(keys.at(0) != keys.at(1));
     }
     
     void testGetStatusWithoutSecureChannel() {
