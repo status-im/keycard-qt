@@ -157,7 +157,11 @@ ApplicationInfo CommandSet::select(bool force)
     APDU::Command cmd(APDU::CLA_ISO7816, APDU::INS_SELECT, 0x04, 0x00);
     cmd.setData(KEYCARD_DEFAULT_INSTANCE_AID);
     cmd.setLe(0);  // Expect response data
-    
+
+    // SELECT drops the card-side session; close the host channel first so a
+    // failed or interrupted SELECT cannot leave it marked open.
+    resetSecureChannel();
+
     // Send command (no secure channel needed, but ensure card is connected)
     APDU::Response response = send(cmd, false);
     
@@ -216,7 +220,7 @@ PairingInfo CommandSet::pair(const QString& pairingPassword)
         challenge.size() / sizeof(quint32)
     );
     
-    APDU::Command cmd1 = buildCommand(APDU::INS_PAIR, APDU::P1PairFirstStep, 0, challenge);
+    APDU::Command cmd1 = buildCommand(APDU::INS_PAIR, APDU::P1PairFirstStep, APDU::P2PairPersistent, challenge);
     APDU::Response resp1 = send(cmd1, false);  // No secure channel yet, but ensure card connected
     
     if (!checkOK(resp1)) {
@@ -322,62 +326,75 @@ bool CommandSet::openSecureChannel(const PairingInfo& pairingInfo)
     m_pairingInfo = pairingInfo;
     m_pairingBoundInstanceUID = m_cardInstanceUID;
 
-    // Build OPEN_SECURE_CHANNEL command
-    // P1 = pairing index, data = our ephemeral public key
-    QByteArray data = m_secureChannel->rawPublicKey();
-    
-    if (data.isEmpty()) {
-        m_lastError = "No public key available - secure channel not initialized";
-        return false;
+    auto failOpen = [this](const QString& fallbackError) {
+        if (m_lastError.isEmpty()) {
+            m_lastError = fallbackError;
+        }
+        if (m_secureChannel) {
+            m_secureChannel->reset();
+        }
+        m_needsSecureChannelReestablishment = true;
+    };
+
+    bool opened = false;
+    for (int attempt = 0; attempt < 2 && !opened; ++attempt) {
+        // Never reuse the INIT one-shot ECDH (or a previous OPEN_SC ephemeral)
+        // for OPEN_SC: the card accepts OPEN_SC then fails MA with SW=6982.
+        if (m_appInfo.secureChannelPublicKey.isEmpty()
+            || !m_secureChannel->generateSecret(m_appInfo.secureChannelPublicKey)) {
+            failOpen(QStringLiteral("Failed to generate ECDH secret"));
+            break;
+        }
+
+        QByteArray data = m_secureChannel->rawPublicKey();
+        if (data.isEmpty()) {
+            failOpen(QStringLiteral("No public key available - secure channel not initialized"));
+            break;
+        }
+
+        APDU::Command cmd = buildCommand(APDU::INS_OPEN_SECURE_CHANNEL, pairingInfo.index, 0, data);
+        APDU::Response resp = send(cmd, false);
+        if (!checkOK(resp)) {
+            failOpen(QStringLiteral("Failed to open secure channel"));
+            continue;
+        }
+
+        QByteArray cardData = resp.data();
+        if (cardData.size() < 48) {
+            failOpen(QStringLiteral("Invalid card data size for session key derivation"));
+            continue;
+        }
+
+        QByteArray salt = cardData.left(32);
+        QByteArray iv = cardData.mid(32, 16);
+        QCryptographicHash hash(QCryptographicHash::Sha512);
+        hash.addData(m_secureChannel->secret());
+        hash.addData(pairingInfo.key);
+        hash.addData(salt);
+        QByteArray result = hash.result();
+
+        m_secureChannel->init(iv, result.left(32), result.mid(32));
+        // Clear before send(secure=true): MUTUALLY_AUTHENTICATE would otherwise
+        // re-enter ensureSecureChannel and OPEN_SC forever.
+        m_needsSecureChannelReestablishment = false;
+
+        try {
+            if (mutualAuthenticate()) {
+                opened = true;
+                break;
+            }
+        } catch (...) {
+            failOpen(QStringLiteral("Mutual authentication failed"));
+            throw;
+        }
+
+        failOpen(QStringLiteral("Mutual authentication failed"));
     }
-    
-    APDU::Command cmd = buildCommand(APDU::INS_OPEN_SECURE_CHANNEL, pairingInfo.index, 0, data);
-    APDU::Response resp = send(cmd, false);  // Opening secure channel, ensure card connected
-    
-    if (!checkOK(resp)) {
-        m_lastError = "Failed to open secure channel";
-        return false;
-    }
-    
-    // Derive session keys from response
-    // cardData format: [salt (32 bytes)][iv (16 bytes)]
-    QByteArray cardData = resp.data();
-    
-    if (cardData.size() < 48) {
-        m_lastError = "Invalid card data size for session key derivation";
-        return false;
-    }
-    
-    QByteArray salt = cardData.left(32);
-    QByteArray iv = cardData.mid(32);
-    
-    // Derive encryption and MAC keys using SHA-512 (matching Go's DeriveSessionKeys)
-    // hash = SHA512(secret + pairing_key + salt)
-    // enc_key = hash[0:32]  (first 32 bytes)
-    // mac_key = hash[32:64] (last 32 bytes)
-    
-    QCryptographicHash hash(QCryptographicHash::Sha512);
-    hash.addData(m_secureChannel->secret());
-    hash.addData(pairingInfo.key);
-    hash.addData(salt);
-    QByteArray result = hash.result();  // 64 bytes
-    
-    QByteArray encKey = result.left(32);   // First 32 bytes for AES-256
-    QByteArray macKey = result.mid(32);    // Last 32 bytes for MAC
-    
-    // Initialize secure channel
-    m_secureChannel->init(iv, encKey, macKey);
-    
-    // Perform mutual authentication
-    if (!mutualAuthenticate()) {
-        m_lastError = "Mutual authentication failed";
+
+    if (!opened) {
         return false;
     }
 
-    m_needsSecureChannelReestablishment = false;
-    
-    // Cache status after opening secure channel (matching status-keycard-go)
-    // This avoids blocking getStatus() calls later
     try {
         m_cachedStatus = getStatus();
         m_hasCachedStatus = true;
@@ -423,7 +440,7 @@ bool CommandSet::init(const Secrets& secrets)
         return false;
     }
 
-    auto appInfo = select();
+    auto appInfo = select(true);
     if (!m_appInfo.installed) {
         qWarning() << "CommandSet::init(): Failed to select applet";
         m_lastError = "Failed to select applet";
@@ -460,20 +477,34 @@ bool CommandSet::init(const Secrets& secrets)
     
     // After init, we need to SELECT again to get initialized state
     m_appInfo = select(true);
-    // Cache PIN for auto-reauth after NFC session loss
+    if (!m_appInfo.initialized) {
+        m_lastError = "Card did not report initialized after INIT";
+        qWarning() << m_lastError;
+        return false;
+    }
+
     m_wasAuthenticated = true;
     m_cachedPIN = secrets.pin.toUtf8();
     resetSecureChannel();
-    
+
     try {
         m_cachedStatus = getStatus();
         m_hasCachedStatus = true;
-        qDebug() << "CommandSet: Updated cached status after PIN verification - PIN retries:" 
-                    << m_cachedStatus.pinRetryCount << "PUK retries:" << m_cachedStatus.pukRetryCount;
     } catch (...) {
-        qWarning() << "CommandSet: Failed to update cached status after PIN verification";
+        qWarning() << "CommandSet: Failed to cache status after init";
+        m_hasCachedStatus = false;
     }
-    
+
+    if (!m_secureChannel || !m_secureChannel->isOpen()) {
+        if (m_lastError.isEmpty()) {
+            m_lastError = "Failed to open secure channel after init";
+        }
+        m_cachedPIN.clear();
+        m_wasAuthenticated = false;
+        m_hasCachedStatus = false;
+        return false;
+    }
+
     return true;
 }
 
@@ -1250,7 +1281,7 @@ bool CommandSet::ensureSecureChannel()
     }
     
     // STEP 2: Re-establishment needed after session loss
-    if (!m_secureChannel || !m_secureChannel->isOpen()) {
+    if (m_needsSecureChannelReestablishment || !m_secureChannel || !m_secureChannel->isOpen()) {
         if (!reestablishSecureChannel()) {
             qWarning() << "CommandSet::ensureSecureChannel(): Failed to re-establish secure channel";
             return false;  // Error already set by reestablishSecureChannel()
