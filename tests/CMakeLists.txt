@@ -75,6 +75,12 @@ add_keycard_test(test_card_command mocks/mock_backend.cpp)
 # QSKIP alone exits 0 and would otherwise report as a silent pass.
 add_keycard_test(test_simulator_smoke sim_backend.cpp)
 target_link_libraries(test_simulator_smoke PRIVATE Qt6::Network)
+add_keycard_test(test_simulator_pin_blocking sim_backend.cpp)
+target_link_libraries(test_simulator_pin_blocking PRIVATE Qt6::Network)
+add_keycard_test(test_simulator_puk_unblock sim_backend.cpp)
+target_link_libraries(test_simulator_puk_unblock PRIVATE Qt6::Network)
+add_keycard_test(test_simulator_factory_reset sim_backend.cpp)
+target_link_libraries(test_simulator_factory_reset PRIVATE Qt6::Network)
 
 # Threading tests (requires Qt Concurrent)
 add_executable(test_communication_manager_threading test_communication_manager_threading.cpp mocks/mock_backend.cpp)
@@ -96,7 +102,11 @@ set_tests_properties(test_communication_manager_threading PROPERTIES
 
 message(STATUS "Unit tests configured - run with: ctest --verbose")
 
-set(KEYCARD_SIMULATOR_TESTS test_simulator_smoke)
+set(KEYCARD_SIMULATOR_TESTS
+    test_simulator_smoke
+    test_simulator_pin_blocking
+    test_simulator_puk_unblock
+    test_simulator_factory_reset)
 set_tests_properties(${KEYCARD_SIMULATOR_TESTS} PROPERTIES
     RESOURCE_LOCK keycard-simulator
     SKIP_REGULAR_EXPRESSION "keycard-simulator is not listening")
