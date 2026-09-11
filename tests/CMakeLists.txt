@@ -1,5 +1,5 @@
 # Qt Test framework and Concurrent for threading tests
-find_package(Qt6 REQUIRED COMPONENTS Test Concurrent)
+find_package(Qt6 REQUIRED COMPONENTS Test Concurrent Network)
 
 # Enable testing
 enable_testing()
@@ -66,6 +66,16 @@ add_keycard_test(test_communication_manager_sync mocks/mock_backend.cpp)
 # CardCommand pattern tests
 add_keycard_test(test_card_command mocks/mock_backend.cpp)
 
+# Integration tests: these drive the real applet in keycard-simulator over TCP
+# (status-keycard-qt/test/keycard-simulator, started by hand — see the README).
+#
+# They share one simulator process, whose applet/crypto state is not safe for
+# concurrent use, so they hold a resource lock rather than running in parallel.
+# Without a simulator they skip, and ctest is told to read that as a skip: a
+# QSKIP alone exits 0 and would otherwise report as a silent pass.
+add_keycard_test(test_simulator_smoke sim_backend.cpp)
+target_link_libraries(test_simulator_smoke PRIVATE Qt6::Network)
+
 # Threading tests (requires Qt Concurrent)
 add_executable(test_communication_manager_threading test_communication_manager_threading.cpp mocks/mock_backend.cpp)
 target_link_libraries(test_communication_manager_threading
@@ -86,3 +96,7 @@ set_tests_properties(test_communication_manager_threading PROPERTIES
 
 message(STATUS "Unit tests configured - run with: ctest --verbose")
 
+set(KEYCARD_SIMULATOR_TESTS test_simulator_smoke)
+set_tests_properties(${KEYCARD_SIMULATOR_TESTS} PROPERTIES
+    RESOURCE_LOCK keycard-simulator
+    SKIP_REGULAR_EXPRESSION "keycard-simulator is not listening")
