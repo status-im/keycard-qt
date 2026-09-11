@@ -108,5 +108,6 @@ set(KEYCARD_SIMULATOR_TESTS
     test_simulator_puk_unblock
     test_simulator_factory_reset)
 set_tests_properties(${KEYCARD_SIMULATOR_TESTS} PROPERTIES
+    LABELS simulator
     RESOURCE_LOCK keycard-simulator
     SKIP_REGULAR_EXPRESSION "keycard-simulator is not listening")

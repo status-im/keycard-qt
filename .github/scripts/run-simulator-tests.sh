@@ -17,7 +17,7 @@ EXPECTED=(
 LOG="$(mktemp)"
 trap 'rm -f "$LOG"' EXIT
 
-(cd "$BUILD_DIR" && ctest -R '^test_simulator_' --no-tests=error --output-on-failure --verbose) 2>&1 | tee "$LOG"
+(cd "$BUILD_DIR" && ctest -L simulator --no-tests=error --output-on-failure --verbose) 2>&1 | tee "$LOG"
 ctest_rc=${PIPESTATUS[0]}
 
 failed=0

@@ -8,6 +8,7 @@
 
 namespace {
 constexpr int kTimeoutMs = 15000;
+constexpr int kProbeTimeoutMs = 500;
 }
 
 namespace Keycard {
@@ -29,11 +30,11 @@ bool SimulatorBackend::simulatorAvailable(quint16 port)
 {
     QTcpSocket probe;
     probe.connectToHost(QStringLiteral("127.0.0.1"), port);
-    if (!probe.waitForConnected(2000)) {
+    if (!probe.waitForConnected(kProbeTimeoutMs)) {
         return false;
     }
     probe.write("PING\n");
-    if (!probe.waitForBytesWritten(2000) || !probe.waitForReadyRead(2000)) {
+    if (!probe.waitForBytesWritten(kProbeTimeoutMs) || !probe.waitForReadyRead(kProbeTimeoutMs)) {
         return false;
     }
     return probe.readLine().startsWith("OK");

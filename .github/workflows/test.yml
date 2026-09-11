@@ -234,9 +234,9 @@ jobs:
           cd build
           if [ "${{ runner.os }}" = "Windows" ]; then
             # Windows: retry flaky tests up to 3 times
-            ctest --output-on-failure --verbose -C Release --repeat until-pass:3
+            ctest --output-on-failure --verbose -C Release --repeat until-pass:3 -LE simulator
           else
-            ctest --output-on-failure --verbose
+            ctest --output-on-failure --verbose -LE simulator
           fi
 
       - name: Test Summary
