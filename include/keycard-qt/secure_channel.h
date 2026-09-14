@@ -6,6 +6,7 @@
 #include <QByteArray>
 #include <QSharedPointer>
 #include <QMutex>
+#include <QRecursiveMutex>
 
 
 namespace Keycard {
@@ -99,11 +100,11 @@ private:
     struct Private;
     QSharedPointer<Private> d;
     
-    // Thread safety - protects IV state during command encryption/transmission
-    // Critical because IV is updated after each send() and multiple threads
-    // may call CommandSet methods simultaneously (e.g. getStatus from UI thread
-    // while authorize runs on worker thread)
-    mutable QMutex m_secureMutex;
+    // Protects ECDH keys, session state and IV. generateSecret()/reset() run on
+    // the command thread and on the channel thread (onTargetLost); without this
+    // lock both can EVP_PKEY_free the same key. Recursive so send() can still
+    // call transmit() if that synchronously delivers card-lost -> reset().
+    mutable QRecursiveMutex m_secureMutex;
     
     // Helper methods
     QByteArray calculateMAC(const QByteArray& meta, const QByteArray& data);
