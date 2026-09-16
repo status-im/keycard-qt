@@ -34,6 +34,9 @@ struct SecureChannel::Private {
     QByteArray encKey;
     QByteArray macKey;
     bool open = false;
+    // Bumped by init()/reset() so send() can tell the session changed while
+    // the lock was released for transmit().
+    quint64 session = 0;
     
     // MAC state
     int openedIndex = -1;
@@ -227,6 +230,7 @@ void SecureChannel::init(const QByteArray& iv, const QByteArray& encKey, const Q
     d->macKey = macKey;  // Full 32 bytes for AES-256
     d->open = true;
     d->openedIndex = 0;
+    ++d->session;
 }
 
 void SecureChannel::reset()
@@ -239,6 +243,7 @@ void SecureChannel::reset()
     d->macKey.clear();
     d->open = false;
     d->openedIndex = -1;
+    ++d->session;
     
     // NOTE: d->secret, d->rawPublicKeyData, and d->privateKey are kept
     // They're needed for OPEN_SECURE_CHANNEL after SELECT
@@ -305,18 +310,33 @@ APDU::Response SecureChannel::send(const APDU::Command& command)
         secureCmd.setLe(command.le());
     }
     
-    // Send through base channel
+    // Send through base channel. The lock is released for the transmit: the
+    // NFC backend blocks on the channel thread, and that thread must be able
+    // to reset() this object on card loss without waiting for us.
+    const quint64 session = d->session;
+    const QByteArray serialized = secureCmd.serialize();
+    IChannel* channel = d->channel;
+    locker.unlock();
+
     QByteArray rawResponse;
     try {
-        rawResponse = d->channel->transmit(secureCmd.serialize());
+        rawResponse = channel->transmit(serialized);
     } catch (...) {
+        locker.relock();
         // CRITICAL: If transmission fails, the card never received the new IV.
         // We MUST restore our local IV to the previous state, otherwise we will
         // be permanently desynchronized from the card (we'll encrypt next cmd
         // with IV_n+1, card expects IV_n).
-        qWarning() << "SecureChannel: Transmission failed, restoring IV to prevent desync";
-        d->iv = originalIV;
+        if (d->session == session) {
+            qWarning() << "SecureChannel: Transmission failed, restoring IV to prevent desync";
+            d->iv = originalIV;
+        }
         throw; // Re-throw to let caller handle the error
+    }
+
+    locker.relock();
+    if (d->session != session || !d->open) {
+        throw std::runtime_error("Secure channel was reset during transmit");
     }
 
     APDU::Response response(rawResponse);
