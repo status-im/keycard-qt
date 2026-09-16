@@ -123,7 +123,7 @@ private:
         }
         return result;
     }
-    
+
     std::shared_ptr<KeycardChannel> m_channel;
     std::shared_ptr<CommandSet> m_cmdSet;
     MockBackend* m_mock;
@@ -376,7 +376,18 @@ private slots:
         QCOMPARE(countTransmittedInstruction(APDU::INS_OPEN_SECURE_CHANNEL), 2);
         QCOMPARE(countTransmittedInstruction(APDU::INS_MUTUALLY_AUTHENTICATE), 2);
     }
-    
+
+    void testOpenSecureChannelDoesNotRetryRejectedPairingSlot() {
+        m_mock->queueResponse(validSelectResponse());
+        QVERIFY(m_cmdSet->select().initialized);
+
+        m_mock->queueResponse(QByteArray::fromHex("6a86"));
+        m_mock->queueResponse(QByteArray::fromHex("6a86"));
+
+        QVERIFY(!m_cmdSet->openSecureChannel(PairingInfo(QByteArray(32, 0x44), 3)));
+        QCOMPARE(countTransmittedInstruction(APDU::INS_OPEN_SECURE_CHANNEL), 1);
+    }
+
     void testGetStatusWithoutSecureChannel() {
         ApplicationStatus status = m_cmdSet->getStatus();
         
