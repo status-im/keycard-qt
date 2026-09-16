@@ -4,9 +4,12 @@
 #include "mocks/mock_backend.h"
 #include <QCryptographicHash>
 #include <QMessageAuthenticationCode>
+#include <QSemaphore>
 #include <QVector>
+#include <atomic>
 #include <memory>
 #include <stdexcept>
+#include <thread>
 #include <utility>
 
 using namespace Keycard;
@@ -123,7 +126,7 @@ private:
         }
         return result;
     }
-    
+
     std::shared_ptr<KeycardChannel> m_channel;
     std::shared_ptr<CommandSet> m_cmdSet;
     MockBackend* m_mock;
@@ -376,7 +379,49 @@ private slots:
         QCOMPARE(countTransmittedInstruction(APDU::INS_OPEN_SECURE_CHANNEL), 2);
         QCOMPARE(countTransmittedInstruction(APDU::INS_MUTUALLY_AUTHENTICATE), 2);
     }
-    
+
+    void testCardLostDuringSecureTransmitDoesNotBlockChannelThread() {
+        m_mock->queueResponse(validSelectResponse());
+        QVERIFY(m_cmdSet->select().initialized);
+
+        // The Qt NFC backend waits for the tag on the channel thread and delivers
+        // targetLost there while the command thread is still inside transmit().
+        QSemaphore lossHandled;
+        std::atomic<bool> lossTriggered{false};
+        std::atomic<bool> channelThreadBlocked{false};
+        m_mock->setResponseHandler([&](const QByteArray& apdu) {
+            const uint8_t ins = static_cast<uint8_t>(apdu.at(1));
+            if (ins == APDU::INS_OPEN_SECURE_CHANNEL) {
+                return openSecureChannelResponse();
+            }
+            if (ins == APDU::INS_MUTUALLY_AUTHENTICATE && !lossTriggered.exchange(true)) {
+                QMetaObject::invokeMethod(m_mock, [&]() {
+                    emit m_mock->cardRemoved();
+                    lossHandled.release();
+                }, Qt::QueuedConnection);
+                if (!lossHandled.tryAcquire(1, 2000)) {
+                    channelThreadBlocked = true;
+                }
+            }
+            return QByteArray::fromHex("9000");
+        });
+
+        std::atomic<bool> done{false};
+        std::thread commandThread([&]() {
+            try {
+                m_cmdSet->openSecureChannel(PairingInfo(QByteArray(32, 0x44), 0));
+            } catch (...) {
+            }
+            done = true;
+        });
+        QTRY_VERIFY_WITH_TIMEOUT(done.load(), 10000);
+        commandThread.join();
+
+        QVERIFY(lossTriggered.load());
+        QVERIFY2(!channelThreadBlocked.load(),
+                 "onTargetLost blocked on SecureChannel's mutex while the command thread was in transmit()");
+    }
+
     void testGetStatusWithoutSecureChannel() {
         ApplicationStatus status = m_cmdSet->getStatus();
         
