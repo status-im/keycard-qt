@@ -27,13 +27,9 @@ class AdvancedKeycardApp : public QObject
 public:
     AdvancedKeycardApp(QObject* parent = nullptr) : QObject(parent)
     {
-        // Create channel and command set. init() opens the secure channel after
-        // INIT, which needs a pairing password provider (same password as InitCommand).
+        // Create channel and command set
         auto channel = std::make_shared<KeycardChannel>();
-        const QString pairingPassword = QStringLiteral("KeycardDefaultPairing");
-        m_commandSet = std::make_shared<CommandSet>(
-            channel, nullptr,
-            [pairingPassword](const QString&) { return pairingPassword; });
+        m_commandSet = std::make_shared<CommandSet>(channel, nullptr, nullptr);
         
         // Create and initialize CommunicationManager
         m_commMgr = std::make_shared<CommunicationManager>();
