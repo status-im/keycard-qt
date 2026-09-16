@@ -483,6 +483,17 @@ bool CommandSet::init(const Secrets& secrets)
         return false;
     }
 
+    // The card now holds the pairing token from secrets; pair with it directly
+    // instead of asking the password provider, which may not exist or may
+    // answer with a different password.
+    if (!pair(secrets.pairingPassword).isValid()) {
+        qWarning() << "CommandSet::init(): Pairing after INIT failed:" << m_lastError;
+        return false;
+    }
+    if (m_pairingStorage && !m_pairingStorage->save(m_cardInstanceUID, m_pairingInfo)) {
+        qWarning() << "CommandSet::init(): Failed to save pairing (will need to re-pair next time)";
+    }
+
     m_wasAuthenticated = true;
     m_cachedPIN = secrets.pin.toUtf8();
     resetSecureChannel();
