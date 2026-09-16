@@ -354,15 +354,17 @@ bool CommandSet::openSecureChannel(const PairingInfo& pairingInfo)
 
         APDU::Command cmd = buildCommand(APDU::INS_OPEN_SECURE_CHANNEL, pairingInfo.index, 0, data);
         APDU::Response resp = send(cmd, false);
+        // Only a failed MUTUALLY_AUTHENTICATE is retried: a rejected OPEN_SC
+        // (bad pairing index, removed pairing) answers the same way every time.
         if (!checkOK(resp)) {
             failOpen(QStringLiteral("Failed to open secure channel"));
-            continue;
+            break;
         }
 
         QByteArray cardData = resp.data();
         if (cardData.size() < 48) {
             failOpen(QStringLiteral("Invalid card data size for session key derivation"));
-            continue;
+            break;
         }
 
         QByteArray salt = cardData.left(32);
