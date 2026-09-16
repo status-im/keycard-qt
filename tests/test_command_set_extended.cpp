@@ -12,22 +12,6 @@
 using namespace Keycard;
 using namespace Keycard::Test;
 
-class FixedPairingStorage : public IPairingStorage {
-public:
-    explicit FixedPairingStorage(PairingInfo pairing)
-        : m_pairing(std::move(pairing)) {}
-
-    PairingInfo load(const QString&) override { return m_pairing; }
-    bool save(const QString&, const PairingInfo& pairing) override {
-        m_pairing = pairing;
-        return true;
-    }
-    bool remove(const QString&) override { return true; }
-
-private:
-    PairingInfo m_pairing;
-};
-
 /**
  * @brief Extended internal CommandSet tests
  * 
@@ -123,7 +107,37 @@ private:
         }
         return result;
     }
-    
+
+    // Answers like a pre-initialized card that accepts INIT and then pairs only
+    // with the given password.
+    void installInitCardHandler(const QString& cardPairingPassword, bool mutualAuthSucceeds = true) {
+        const QByteArray pairingToken = derivePairingToken(cardPairingPassword);
+        auto selects = std::make_shared<int>(0);
+        m_mock->setResponseHandler([this, pairingToken, selects, mutualAuthSucceeds](const QByteArray& apdu) {
+            const uint8_t ins = static_cast<uint8_t>(apdu.at(1));
+            if (ins == APDU::INS_MUTUALLY_AUTHENTICATE && !mutualAuthSucceeds) {
+                return QByteArray::fromHex("6982");
+            }
+            if (ins == APDU::INS_SELECT) {
+                return (*selects)++ == 0 ? preInitializedSelectResponse() : validSelectResponse();
+            }
+            if (ins == APDU::INS_PAIR) {
+                if (static_cast<uint8_t>(apdu.at(2)) == APDU::P1PairFirstStep) {
+                    const QByteArray challenge = apdu.mid(5, static_cast<uint8_t>(apdu.at(4)));
+                    QCryptographicHash hash(QCryptographicHash::Sha256);
+                    hash.addData(pairingToken);
+                    hash.addData(challenge);
+                    return hash.result() + QByteArray(32, 0x33) + QByteArray::fromHex("9000");
+                }
+                return QByteArray(1, 0) + QByteArray(32, 0x44) + QByteArray::fromHex("9000");
+            }
+            if (ins == APDU::INS_OPEN_SECURE_CHANNEL) {
+                return openSecureChannelResponse();
+            }
+            return QByteArray::fromHex("9000");
+        });
+    }
+
     std::shared_ptr<KeycardChannel> m_channel;
     std::shared_ptr<CommandSet> m_cmdSet;
     MockBackend* m_mock;
@@ -352,31 +366,52 @@ private slots:
     }
 
     void testInitFailsWhenSecureChannelCannotBeEstablished() {
-        const PairingInfo pairing(QByteArray(32, 0x44), 0);
-        auto storage = std::make_shared<FixedPairingStorage>(pairing);
-        auto commandSet = std::make_shared<CommandSet>(m_channel, storage, nullptr);
-
-        m_mock->queueResponse(preInitializedSelectResponse());
-        m_mock->queueResponse(QByteArray::fromHex("9000"));
-        m_mock->queueResponse(validSelectResponse());
-        m_mock->queueResponse(openSecureChannelResponse());
-        m_mock->queueResponse(QByteArray::fromHex("6982"));
-        m_mock->queueResponse(openSecureChannelResponse());
-        m_mock->queueResponse(QByteArray::fromHex("6982"));
+        installInitCardHandler(QStringLiteral("test-password"), false);
 
         const Secrets secrets(
             QStringLiteral("123456"),
             QStringLiteral("123456789012"),
             QStringLiteral("test-password"));
-        QVERIFY(!commandSet->init(secrets));
-        QVERIFY(!commandSet->lastError().isEmpty());
-        QVERIFY(!commandSet->testSecureChannelIsOpen());
-        QVERIFY(!commandSet->testHasCachedStatus());
-        QVERIFY(!commandSet->testWasAuthenticated());
+        QVERIFY(!m_cmdSet->init(secrets));
+        QVERIFY(!m_cmdSet->lastError().isEmpty());
+        QVERIFY(!m_cmdSet->testSecureChannelIsOpen());
+        QVERIFY(!m_cmdSet->testHasCachedStatus());
+        QVERIFY(!m_cmdSet->testWasAuthenticated());
         QCOMPARE(countTransmittedInstruction(APDU::INS_OPEN_SECURE_CHANNEL), 2);
         QCOMPARE(countTransmittedInstruction(APDU::INS_MUTUALLY_AUTHENTICATE), 2);
     }
-    
+
+    void testInitSucceedsOnceCardIsInitializedWithoutPairingProvider() {
+        installInitCardHandler(QStringLiteral("test-password"));
+
+        const Secrets secrets(
+            QStringLiteral("123456"),
+            QStringLiteral("123456789012"),
+            QStringLiteral("test-password"));
+        const bool ok = m_cmdSet->init(secrets);
+
+        QCOMPARE(countTransmittedInstruction(APDU::INS_INIT), 1);
+        QVERIFY2(ok, qPrintable(QStringLiteral("INIT was accepted by the card, but init() reported: %1")
+                                    .arg(m_cmdSet->lastError())));
+    }
+
+    void testInitPairsWithTheSecretsPairingPassword() {
+        installInitCardHandler(QStringLiteral("test-password"));
+        auto commandSet = std::make_shared<CommandSet>(
+            m_channel, nullptr,
+            [](const QString&) { return QStringLiteral("KeycardDefaultPairing"); });
+
+        const Secrets secrets(
+            QStringLiteral("123456"),
+            QStringLiteral("123456789012"),
+            QStringLiteral("test-password"));
+        const bool ok = commandSet->init(secrets);
+
+        QCOMPARE(countTransmittedInstruction(APDU::INS_INIT), 1);
+        QVERIFY2(ok, qPrintable(QStringLiteral("init() paired with the provider's password instead of secrets: %1")
+                                    .arg(commandSet->lastError())));
+    }
+
     void testGetStatusWithoutSecureChannel() {
         ApplicationStatus status = m_cmdSet->getStatus();
         
