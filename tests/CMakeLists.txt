@@ -53,6 +53,7 @@ add_keycard_test(test_keycard_channel)
 add_keycard_test(test_command_set_new mocks/mock_backend.cpp)
 add_keycard_test(test_pbkdf2)
 add_keycard_test(test_init_pair mocks/mock_backend.cpp)
+add_keycard_test(test_secure_channel_v2 mocks/mock_backend.cpp mocks/scv2_card_emulator.cpp)
 add_keycard_test(test_globalplatform_crypto)
 
 # Dependency Injection tests with mock backend

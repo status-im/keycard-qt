@@ -76,7 +76,9 @@ CommandSet::CommandSet(std::shared_ptr<Keycard::KeycardChannel> channel,
     , m_pairingStorage(pairingStorage)
     , m_passwordProvider(passwordProvider)
     , m_secureChannel(new SecureChannel(channel.get()))
-{   
+    , m_secureChannelV2(new SecureChannelV2(channel.get()))
+    , m_trustedCaKeys(defaultTrustedCaKeys())
+{
     if (!m_channel) {
         qWarning() << "CommandSet: Null channel provided";
         return;
@@ -117,6 +119,9 @@ void CommandSet::clearStaleCardSessionState()
     if (m_secureChannel) {
         m_secureChannel->reset();
     }
+    if (m_secureChannelV2) {
+        m_secureChannelV2->reset();
+    }
     m_wasAuthenticated = false;
     m_cachedPIN.clear();
     m_hasCachedStatus = false;
@@ -134,6 +139,47 @@ bool CommandSet::checkOK(const APDU::Response& response)
     }
     m_lastError.clear();
     return true;
+}
+
+bool CommandSet::secureChannelOpen() const
+{
+    if (usesSecureChannelV2()) {
+        return m_secureChannelV2 && m_secureChannelV2->isOpen();
+    }
+    return m_secureChannel && m_secureChannel->isOpen();
+}
+
+bool CommandSet::rejectOnSecureChannelV2(const char* operation)
+{
+    if (!usesSecureChannelV2()) {
+        return false;
+    }
+    m_lastError = QStringLiteral("%1 is not supported by Keycard applet %2.%3")
+                      .arg(QLatin1String(operation))
+                      .arg(m_appInfo.appVersion)
+                      .arg(m_appInfo.appVersionMinor);
+    qWarning() << "CommandSet:" << m_lastError;
+    return true;
+}
+
+void CommandSet::setTrustedCaKeys(const QList<QByteArray>& caKeys)
+{
+    m_trustedCaKeys = caKeys;
+    updateCardTrust();
+}
+
+void CommandSet::updateCardTrust()
+{
+    if (!usesSecureChannelV2()) {
+        m_cardTrusted = true;
+        return;
+    }
+    const ScV2::Certificate certificate = ScV2::Certificate::parse(m_appInfo.certificate);
+    m_cardTrusted = certificate.isTrustedBy(m_trustedCaKeys);
+    if (!m_cardTrusted) {
+        qWarning() << "CommandSet: Card certificate is not signed by a trusted CA, recovered CA key:"
+                   << certificate.recoverCaPublicKey().toHex();
+    }
 }
 
 APDU::Command CommandSet::buildCommand(uint8_t ins, uint8_t p1, uint8_t p2, const QByteArray& data)
@@ -198,8 +244,10 @@ ApplicationInfo CommandSet::select(bool force)
         qDebug() << "CommandSet: Pre-initialized card detected (no instance UID yet)";
     }
     qDebug() << "CommandSet: Card selected, UID:" << m_cardInstanceUID;
-    
-    // Generate ECDH secret if card supports secure channel
+
+    updateCardTrust();
+
+    // Generate ECDH secret if card supports secure channel (applet 3.x; 4.x keys are per OPEN)
     if (!m_appInfo.secureChannelPublicKey.isEmpty()) {
         m_secureChannel->generateSecret(m_appInfo.secureChannelPublicKey);
     }
@@ -212,7 +260,10 @@ PairingInfo CommandSet::pair(const QString& pairingPassword)
     qDebug() << "CommandSet::pair()";
 
     select();
-    
+    if (rejectOnSecureChannelV2("PAIR")) {
+        return PairingInfo();
+    }
+
     // Step 1: Send random challenge
     QByteArray challenge(32, 0);
     QRandomGenerator::global()->fillRange(
@@ -317,7 +368,11 @@ PairingInfo CommandSet::pair(const QString& pairingPassword)
 bool CommandSet::openSecureChannel(const PairingInfo& pairingInfo)
 {
     qDebug() << "CommandSet::openSecureChannel() pairingIndex:" << pairingInfo.index;
-    
+
+    if (usesSecureChannelV2()) {
+        return openSecureChannelV2();
+    }
+
     if (!pairingInfo.isValid()) {
         m_lastError = "Invalid pairing info";
         return false;
@@ -410,8 +465,63 @@ bool CommandSet::openSecureChannel(const PairingInfo& pairingInfo)
     return true;
 }
 
+bool CommandSet::openSecureChannelV2()
+{
+    qDebug() << "CommandSet::openSecureChannelV2()";
+
+    auto failOpen = [this](const QString& error) {
+        m_lastError = error;
+        qWarning() << "CommandSet::openSecureChannelV2():" << m_lastError;
+        m_secureChannelV2->reset();
+        m_needsSecureChannelReestablishment = true;
+        return false;
+    };
+
+    if (!m_cardTrusted) {
+        return failOpen(QString::fromLatin1(Errors::UntrustedCard));
+    }
+
+    const QByteArray data = m_secureChannelV2->prepareOpen();
+    if (data.isEmpty()) {
+        return failOpen(QStringLiteral("Failed to generate ECDH key"));
+    }
+
+    APDU::Response resp = send(buildCommand(APDU::INS_OPEN_SECURE_CHANNEL, 0, 0, data), false);
+    if (!checkOK(resp)) {
+        return failOpen(QStringLiteral("Failed to open secure channel: %1").arg(m_lastError));
+    }
+
+    switch (m_secureChannelV2->completeOpen(resp.data(), m_appInfo.identityPublicKey)) {
+    case SecureChannelV2::OpenResult::Opened:
+        break;
+    case SecureChannelV2::OpenResult::InvalidSignature:
+        return failOpen(QString::fromLatin1(Errors::UntrustedCard));
+    case SecureChannelV2::OpenResult::InvalidResponse:
+        return failOpen(QStringLiteral("Invalid OPEN_SECURE_CHANNEL response"));
+    }
+    m_lastError.clear();
+    m_needsSecureChannelReestablishment = false;
+
+    // A blank 4.x card answers every command but INIT with an empty 9000: nothing to cache
+    if (m_appInfo.initialized) {
+        try {
+            m_cachedStatus = getStatus();
+            m_hasCachedStatus = m_cachedStatus.valid;
+        } catch (...) {
+            qWarning() << "CommandSet: Failed to cache status after opening secure channel";
+            m_hasCachedStatus = false;
+        }
+    }
+
+    return true;
+}
+
 bool CommandSet::mutualAuthenticate()
 {
+    if (rejectOnSecureChannelV2("MUTUALLY AUTHENTICATE")) {
+        return false;
+    }
+
     // Generate random 32-byte challenge
     QByteArray challenge(32, 0);
     QRandomGenerator::global()->fillRange(
@@ -448,7 +558,27 @@ bool CommandSet::init(const Secrets& secrets)
         m_lastError = "Failed to select applet";
         return false;
     }
-    
+
+    if (usesSecureChannelV2()) {
+        // Applet 4.x: INIT travels inside the secure channel and carries no pairing secret;
+        // Secrets::pairingPassword is ignored.
+        if (!openSecureChannelV2()) {
+            return false;
+        }
+        APDU::Response resp = send(buildCommand(APDU::INS_INIT, 0, 0,
+                                                secrets.pin.toUtf8() + secrets.puk.toUtf8()), true);
+        if (!checkOK(resp)) {
+            return false;
+        }
+        m_appInfo = select(true);
+        if (!m_appInfo.initialized) {
+            m_lastError = "Card did not report initialized after INIT";
+            qWarning() << m_lastError;
+            return false;
+        }
+        return finishInit(secrets);
+    }
+
     // Build plaintext data: PIN + PUK + PairingToken
     // PairingToken = PBKDF2(password, salt, 50000 iterations, 32 bytes)
     QByteArray plainData;
@@ -496,6 +626,13 @@ bool CommandSet::init(const Secrets& secrets)
         qWarning() << "CommandSet::init(): Failed to save pairing (will need to re-pair next time)";
     }
 
+    return finishInit(secrets);
+}
+
+bool CommandSet::finishInit(const Secrets& secrets)
+{
+    // Reopen through ensureSecureChannel() with the new PIN cached, so the status is fetched
+    // with the PIN verified, as on every later session
     m_wasAuthenticated = true;
     m_cachedPIN = secrets.pin.toUtf8();
     resetSecureChannel();
@@ -508,7 +645,7 @@ bool CommandSet::init(const Secrets& secrets)
         m_hasCachedStatus = false;
     }
 
-    if (!m_secureChannel || !m_secureChannel->isOpen()) {
+    if (!secureChannelOpen()) {
         if (m_lastError.isEmpty()) {
             m_lastError = "Failed to open secure channel after init";
         }
@@ -524,7 +661,10 @@ bool CommandSet::init(const Secrets& secrets)
 bool CommandSet::unpair(uint8_t index)
 {
     qDebug() << "CommandSet::unpair() index:" << index;
-    
+    if (rejectOnSecureChannelV2("UNPAIR")) {
+        return false;
+    }
+
     APDU::Command cmd = buildCommand(APDU::INS_UNPAIR, index);
     APDU::Response resp = send(cmd, true);
     
@@ -534,7 +674,10 @@ bool CommandSet::unpair(uint8_t index)
 ApplicationStatus CommandSet::getStatus(uint8_t info)
 {
     qDebug() << "CommandSet::getStatus() info:" << info;
-    
+    if (info == APDU::P1GetStatusKeyPath && rejectOnSecureChannelV2("GET STATUS (key path)")) {
+        return ApplicationStatus();
+    }
+
     APDU::Command cmd = buildCommand(APDU::INS_GET_STATUS, info);
     APDU::Response resp = send(cmd, true);
     
@@ -675,7 +818,10 @@ bool CommandSet::unblockPIN(const QString& puk, const QString& newPIN)
 bool CommandSet::changePairingSecret(const QString& newPassword)
 {
     qDebug() << "CommandSet::changePairingSecret()";
-    
+    if (rejectOnSecureChannelV2("CHANGE PAIRING SECRET")) {
+        return false;
+    }
+
     QByteArray data = newPassword.toUtf8();
     APDU::Command cmd = buildCommand(APDU::INS_CHANGE_PIN, APDU::P1ChangePinPairingSecret, 0, data);
     APDU::Response resp = send(cmd, true);
@@ -757,7 +903,10 @@ bool CommandSet::removeKey()
 bool CommandSet::deriveKey(const QString& path)
 {
     qDebug() << "CommandSet::deriveKey() path:" << path;
-    
+    if (rejectOnSecureChannelV2("DERIVE KEY")) {
+        return false;
+    }
+
     uint8_t startingPoint = APDU::P1DeriveKeyFromMaster;
     QByteArray pathData = parseDerivationPath(path, startingPoint);
     
@@ -772,7 +921,11 @@ bool CommandSet::deriveKey(const QString& path)
 QByteArray CommandSet::sign(const QByteArray& data)
 {
     qDebug() << "CommandSet::sign()";
-    
+    // 4.x has no current key: SIGN always derives from the master (use signWithPath)
+    if (rejectOnSecureChannelV2("SIGN with the current key")) {
+        return QByteArray();
+    }
+
     // Validate input first
     if (data.size() != 32) {
         m_lastError = "Data must be 32 bytes (hash)";
@@ -809,8 +962,12 @@ QByteArray CommandSet::signWithPath(const QByteArray& data, const QString& path,
     
     uint8_t startingPoint = APDU::P1DeriveKeyFromMaster;
     QByteArray pathData = parseDerivationPath(path, startingPoint);
-    
-    uint8_t p1 = makeCurrent ? APDU::P1SignDeriveAndMakeCurrent : APDU::P1SignDerive;
+    if (!checkPathSupported(startingPoint)) {
+        return QByteArray();
+    }
+
+    // 4.x always derives from the master and has no current key to update
+    uint8_t p1 = (makeCurrent && !usesSecureChannelV2()) ? APDU::P1SignDeriveAndMakeCurrent : APDU::P1SignDerive;
     
     // Concatenate data + path
     QByteArray cmdData = data + pathData;
@@ -843,8 +1000,12 @@ QByteArray CommandSet::signWithPathFullResponse(const QByteArray& data, const QS
     
     uint8_t startingPoint = APDU::P1DeriveKeyFromMaster;
     QByteArray pathData = parseDerivationPath(path, startingPoint);
-    
-    uint8_t p1 = makeCurrent ? APDU::P1SignDeriveAndMakeCurrent : APDU::P1SignDerive;
+    if (!checkPathSupported(startingPoint)) {
+        return QByteArray();
+    }
+
+    // 4.x always derives from the master and has no current key to update
+    uint8_t p1 = (makeCurrent && !usesSecureChannelV2()) ? APDU::P1SignDeriveAndMakeCurrent : APDU::P1SignDerive;
     
     // Concatenate data + path
     QByteArray cmdData = data + pathData;
@@ -863,7 +1024,10 @@ QByteArray CommandSet::signWithPathFullResponse(const QByteArray& data, const QS
 QByteArray CommandSet::signPinless(const QByteArray& data)
 {
     qDebug() << "CommandSet: SIGN_PINLESS";
-    
+    if (rejectOnSecureChannelV2("SIGN PINLESS")) {
+        return QByteArray();
+    }
+
     // Validate input first
     if (data.size() != 32) {
         m_lastError = "Data must be 32 bytes (hash)";
@@ -889,7 +1053,10 @@ QByteArray CommandSet::signPinless(const QByteArray& data)
 bool CommandSet::setPinlessPath(const QString& path)
 {
     qDebug() << "CommandSet::setPinlessPath() path:" << path;
-    
+    if (rejectOnSecureChannelV2("SET PINLESS PATH")) {
+        return false;
+    }
+
     // Validate input first
     if (!path.startsWith("m/")) {
         m_lastError = "Pinless path must be absolute (start with m/)";
@@ -937,7 +1104,11 @@ QByteArray CommandSet::getData(uint8_t type)
 QByteArray CommandSet::identify(const QByteArray& challenge)
 {
     qDebug() << "CommandSet::identify()";
-    
+    // 4.x reports its identity certificate in SELECT (ApplicationInfo::certificate)
+    if (rejectOnSecureChannelV2("IDENTIFY")) {
+        return QByteArray();
+    }
+
     QByteArray challengeData = challenge;
     if (challengeData.isEmpty()) {
         // Generate random 32-byte challenge
@@ -960,16 +1131,51 @@ QByteArray CommandSet::identify(const QByteArray& challenge)
     return resp.data();
 }
 
+bool CommandSet::checkPathSupported(uint8_t startingPoint)
+{
+    if (startingPoint == APDU::P1DeriveKeyFromMaster || !usesSecureChannelV2()) {
+        return true;
+    }
+    m_lastError = QStringLiteral("Keycard applet 4.x only derives from the master key (path must start with m/)");
+    qWarning() << "CommandSet:" << m_lastError;
+    return false;
+}
+
+bool CommandSet::exportKeyParameters(bool derive, bool makeCurrent, const QString& path, uint8_t exportType,
+                                     uint8_t& p1, QByteArray& pathData)
+{
+    p1 = APDU::P1ExportKeyCurrent;
+    pathData.clear();
+
+    uint8_t startingPoint = APDU::P1DeriveKeyFromMaster;
+    if (derive) {
+        pathData = parseDerivationPath(path, startingPoint);
+        if (!checkPathSupported(startingPoint)) {
+            return false;
+        }
+    }
+    if (usesSecureChannelV2()) {
+        // P1 is ignored by 4.x: the path is always absolute from the master, and an empty path
+        // (no derivation) is the master key itself, whose extended public key cannot be exported
+        if (pathData.isEmpty() && exportType == APDU::P2ExportKeyExtendedPublic) {
+            return !rejectOnSecureChannelV2("EXPORT KEY of the master extended public key");
+        }
+        return true;
+    }
+    if (!derive) {
+        return true;
+    }
+    p1 = makeCurrent ? APDU::P1ExportKeyDeriveAndMakeCurrent : APDU::P1ExportKeyDerive;
+    p1 |= startingPoint;
+    return true;
+}
+
 QByteArray CommandSet::exportKey(bool derive, bool makeCurrent, const QString& path, uint8_t exportType)
 {
     uint8_t p1 = APDU::P1ExportKeyCurrent;
     QByteArray pathData;
-
-    if (derive) {
-        uint8_t startingPoint = APDU::P1DeriveKeyFromMaster;
-        pathData = parseDerivationPath(path, startingPoint);
-        p1 = makeCurrent ? APDU::P1ExportKeyDeriveAndMakeCurrent : APDU::P1ExportKeyDerive;
-        p1 |= startingPoint;
+    if (!exportKeyParameters(derive, makeCurrent, path, exportType, p1, pathData)) {
+        return QByteArray();
     }
 
     APDU::Command cmd = buildCommand(APDU::INS_EXPORT_KEY, p1, exportType, pathData);
@@ -989,14 +1195,10 @@ QByteArray CommandSet::exportKeyExtended(bool derive, bool makeCurrent, const QS
 {
     uint8_t p1 = APDU::P1ExportKeyCurrent;
     QByteArray pathData;
-    
-    if (derive) {
-        uint8_t startingPoint = APDU::P1DeriveKeyFromMaster;
-        pathData = parseDerivationPath(path, startingPoint);
-        p1 = makeCurrent ? APDU::P1ExportKeyDeriveAndMakeCurrent : APDU::P1ExportKeyDerive;
-        p1 |= startingPoint;
+    if (!exportKeyParameters(derive, makeCurrent, path, exportType, p1, pathData)) {
+        return QByteArray();
     }
-    
+
     APDU::Command cmd = buildCommand(APDU::INS_EXPORT_KEY, p1, exportType, pathData);
     cmd.setLe(0);  // Request all available response data
     
@@ -1158,7 +1360,10 @@ void CommandSet::resetSecureChannel()
     if (m_secureChannel) {
         m_secureChannel->reset();
     }
-    
+    if (m_secureChannelV2) {
+        m_secureChannelV2->reset();
+    }
+
     // Mark that we need to re-establish before next command
     // This will be checked by ensureSecureChannel() before any secure operation
     m_needsSecureChannelReestablishment = true;
@@ -1169,19 +1374,26 @@ void CommandSet::resetSecureChannel()
 bool CommandSet::reestablishSecureChannel()
 {
     qDebug() << "CommandSet::reestablishSecureChannel()";
-    
-    // Check if we have pairing info
-    if (m_pairingInfo.index < 0) {
-        m_lastError = "No pairing info available for re-establishment";
-        qWarning() << m_lastError;
-        return false;
-    }
-    
-    // Re-open secure channel using cached pairing
-    if (!openSecureChannel(m_pairingInfo)) {
-        m_lastError = "Failed to re-open secure channel";
-        qWarning() << m_lastError;
-        return false;
+
+    if (usesSecureChannelV2()) {
+        // No pairing on 4.x; keep openSecureChannelV2()'s error (e.g. untrusted card)
+        if (!openSecureChannelV2()) {
+            return false;
+        }
+    } else {
+        // Check if we have pairing info
+        if (m_pairingInfo.index < 0) {
+            m_lastError = "No pairing info available for re-establishment";
+            qWarning() << m_lastError;
+            return false;
+        }
+
+        // Re-open secure channel using cached pairing
+        if (!openSecureChannel(m_pairingInfo)) {
+            m_lastError = "Failed to re-open secure channel";
+            qWarning() << m_lastError;
+            return false;
+        }
     }
 
     m_needsSecureChannelReestablishment = false;
@@ -1208,7 +1420,13 @@ bool CommandSet::reestablishSecureChannel()
 bool CommandSet::ensurePairing()
 {
     qDebug() << "CommandSet::ensurePairing() for card:" << m_cardInstanceUID;
-    
+
+    // Applet 4.x has no pairing at all
+    if (usesSecureChannelV2()) {
+        invalidateCachedPairing();
+        return true;
+    }
+
     // Pre-initialized cards don't need pairing - they need to be initialized first
     // This matches status-keycard-go behavior: if !appInfo.Initialized, return early
     if (!m_appInfo.initialized) {
@@ -1285,7 +1503,7 @@ bool CommandSet::ensurePairing()
 bool CommandSet::ensureSecureChannel()
 {
     qDebug() << "CommandSet::ensureSecureChannel() needsReestablishment:" << m_needsSecureChannelReestablishment 
-             << "isOpen:" << (m_secureChannel ? m_secureChannel->isOpen() : false)
+             << "isOpen:" << secureChannelOpen()
              << "wasAuthenticated:" << m_wasAuthenticated;
 
     // STEP 1: Ensure we have pairing for the current card
@@ -1296,7 +1514,7 @@ bool CommandSet::ensureSecureChannel()
     // STEP 2: Re-establishment needed after session loss.
     // The flag is always set together with reset(), so isOpen() is already false;
     // keep both only while the flag is still cleared before MUTUALLY_AUTHENTICATE.
-    if (m_needsSecureChannelReestablishment || !m_secureChannel || !m_secureChannel->isOpen()) {
+    if (m_needsSecureChannelReestablishment || !secureChannelOpen()) {
         if (!reestablishSecureChannel()) {
             qWarning() << "CommandSet::ensureSecureChannel(): Failed to re-establish secure channel";
             return false;  // Error already set by reestablishSecureChannel()
@@ -1304,7 +1522,7 @@ bool CommandSet::ensureSecureChannel()
     }
     
     // Verify secure channel is actually open
-    if (!m_secureChannel || !m_secureChannel->isOpen()) {
+    if (!secureChannelOpen()) {
         m_lastError = "Secure channel is not open after re-establishment";
         qWarning() << m_lastError;
         return false;
@@ -1445,7 +1663,7 @@ APDU::Response CommandSet::send(const APDU::Command& cmd, bool secure)
             errorResp.append(static_cast<char>(0x85)); // SW2: Conditions not satisfied
             return APDU::Response(errorResp);
         }
-        if (m_appInfo.instanceUID.isEmpty() || !m_secureChannel->isOpen())
+        if (m_appInfo.instanceUID.isEmpty() || !secureChannelOpen())
             select();
     }
     
@@ -1462,6 +1680,14 @@ APDU::Response CommandSet::send(const APDU::Command& cmd, bool secure)
 
         qDebug() << "CommandSet::send(): Sending via secure channel";
         try {
+            if (usesSecureChannelV2()) {
+                APDU::Response response = m_secureChannelV2->send(cmd);
+                if (!m_secureChannelV2->isOpen()) {
+                    // Outer error: the card dropped the session (e.g. tag failure)
+                    m_needsSecureChannelReestablishment = true;
+                }
+                return response;
+            }
             return m_secureChannel->send(cmd);
         }
         catch (const std::runtime_error& e) {

@@ -3,6 +3,7 @@
 #include "types.h"
 #include "types_parser.h"
 #include "secure_channel.h"
+#include "secure_channel_v2.h"
 #include "pairing_storage.h"
 #include "apdu/command.h"
 #include "apdu/response.h"
@@ -343,11 +344,22 @@ public:
      */
     bool ensureSecureChannel();
     
+    /**
+     * @brief CA keys accepted for applet 4.x identity certificates (defaults to defaultTrustedCaKeys())
+     */
+    void setTrustedCaKeys(const QList<QByteArray>& caKeys);
+
+    /**
+     * @brief False when the selected applet 4.x card's certificate is not signed by a trusted CA.
+     * Applet 3.x cards carry no certificate and are always reported trusted.
+     */
+    bool isCardTrusted() const { return m_cardTrusted; }
+
     // Accessors
     ApplicationInfo applicationInfo() const { return m_appInfo; }
     PairingInfo pairingInfo() const { return m_pairingInfo; }
     std::shared_ptr<IPairingStorage> pairingStorage() const { return m_pairingStorage; }
-    
+
     // Test helpers (for unit testing only - bypasses crypto validation)
     #ifdef KEYCARD_ENABLE_TEST_HELPERS
     /**
@@ -370,7 +382,7 @@ public:
         m_secureChannel->init(iv, encKey, macKey);
     }
     bool testSecureChannelIsOpen() const {
-        return m_secureChannel && m_secureChannel->isOpen();
+        return secureChannelOpen();
     }
     bool testWasAuthenticated() const { return m_wasAuthenticated; }
     bool testHasCachedStatus() const { return m_hasCachedStatus; }
@@ -525,6 +537,31 @@ private:
 
     void setCardReady(bool ready);
 
+    /** Applet 4.x selected: no pairing, SecureChannelV2. */
+    bool usesSecureChannelV2() const { return m_appInfo.usesSecureChannelV2(); }
+
+    /** The secure channel of the selected applet generation is open. */
+    bool secureChannelOpen() const;
+
+    /** OPEN_SECURE_CHANNEL for applet 4.x: verify the card's signature and derive session keys. */
+    bool openSecureChannelV2();
+
+    /** Fails (sets lastError, returns true) when an applet-3.x-only command is used on applet 4.x. */
+    bool rejectOnSecureChannelV2(const char* operation);
+
+    /** Re-evaluate m_cardTrusted for the selected card. */
+    void updateCardTrust();
+
+    /** Common tail of init(): cache the PIN, reopen the secure channel and cache the status. */
+    bool finishInit(const Secrets& secrets);
+
+    /** Applet 4.x only derives from the master: reject relative paths there. */
+    bool checkPathSupported(uint8_t startingPoint);
+
+    /** P1 and path data of EXPORT KEY for the selected applet generation; false on unsupported input. */
+    bool exportKeyParameters(bool derive, bool makeCurrent, const QString& path, uint8_t exportType,
+                             uint8_t& p1, QByteArray& pathData);
+
     /** Clears m_pairingInfo and the instance UID it was bound to (see m_pairingBoundInstanceUID). */
     void invalidateCachedPairing();
 
@@ -540,7 +577,10 @@ private:
     std::shared_ptr<IPairingStorage> m_pairingStorage;  // Injected (can be null)
     PairingPasswordProvider m_passwordProvider;  // Injected (can be null)
     
-    QSharedPointer<SecureChannel> m_secureChannel;
+    QSharedPointer<SecureChannel> m_secureChannel;      // applet 3.x
+    QSharedPointer<SecureChannelV2> m_secureChannelV2;  // applet 4.x
+    QList<QByteArray> m_trustedCaKeys;
+    bool m_cardTrusted = true;
     ApplicationInfo m_appInfo;
     PairingInfo m_pairingInfo;
     /** Hex instance UID of the applet m_pairingInfo was loaded/opened for; invalidates fast-path if select() sees another card. */
