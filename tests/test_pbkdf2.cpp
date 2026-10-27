@@ -6,6 +6,7 @@
 
 #include <QTest>
 #include <QDebug>
+#include <QElapsedTimer>
 #include <QCryptographicHash>
 #include <QMessageAuthenticationCode>
 
