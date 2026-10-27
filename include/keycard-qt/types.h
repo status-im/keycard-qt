@@ -33,7 +33,12 @@ struct ApplicationInfo {
     bool initialized;                 ///< True if keycard is initialized
     QByteArray keyUID;                ///< Key UID if keys are loaded
     uint8_t capabilities;             ///< Capability flags (bitmask)
-    
+    uint8_t secureChannelVersion;     ///< 1 = password pairing (applet 3.x), 2 = SecureChannelV2 (applet 4.x)
+    uint8_t appStatus;                ///< Applet 4.x status byte (tag 8C): initialized, LEE mode, PIN retries
+    QByteArray certificate;           ///< Applet 4.x identity certificate (tag 8A, 98 bytes)
+    QByteArray identityPublicKey;     ///< Applet 4.x identity key (compressed, first 33 bytes of the certificate)
+    int pinRetries;                   ///< PIN retries from SELECT (applet 4.x only), -1 when not reported
+
     ApplicationInfo()
         : appVersion(0)
         , appVersionMinor(0)
@@ -41,8 +46,18 @@ struct ApplicationInfo {
         , installed(false)
         , initialized(false)
         , capabilities(static_cast<uint8_t>(Capability::All))  // Assume all capabilities if not specified
+        , secureChannelVersion(1)
+        , appStatus(0)
+        , pinRetries(-1)
     {}
-    
+
+    /**
+     * @brief Applet 4.x: no pairing, certificate-authenticated SecureChannelV2
+     */
+    bool usesSecureChannelV2() const {
+        return secureChannelVersion >= 2;
+    }
+
     /**
      * @brief Check if card has a specific capability
      */
@@ -149,6 +164,7 @@ namespace APDU {
     constexpr uint8_t INS_IDENTIFY = 0x14;
     constexpr uint8_t INS_OPEN_SECURE_CHANNEL = 0x10;
     constexpr uint8_t INS_MUTUALLY_AUTHENTICATE = 0x11;
+    constexpr uint8_t INS_SECURED_APDU = 0x18;  // SecureChannelV2 (applet 4.x) wrapper
     constexpr uint8_t INS_GET_STATUS = 0xF2;
     constexpr uint8_t INS_VERIFY_PIN = 0x20;
     constexpr uint8_t INS_CHANGE_PIN = 0x21;
@@ -226,6 +242,12 @@ namespace APDU {
     constexpr uint16_t SW_WRONG_LENGTH = 0x6700;
     constexpr uint16_t SW_INS_NOT_SUPPORTED = 0x6D00;
     constexpr uint16_t SW_CLA_NOT_SUPPORTED = 0x6E00;
+}
+
+namespace Errors {
+    /// Reported (as lastError / CardInitializationResult::error) when an applet 4.x card's identity
+    /// certificate is not signed by a trusted CA, or its secure-channel signature does not verify.
+    constexpr const char* UntrustedCard = "Untrusted keycard: identity certificate not trusted";
 }
 
 } // namespace Keycard

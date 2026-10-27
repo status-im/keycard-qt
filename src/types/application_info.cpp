@@ -1,6 +1,7 @@
 #include "keycard-qt/types.h"
 #include "keycard-qt/types_parser.h"
 #include "keycard-qt/apdu/utils.h"
+#include <QCryptographicHash>
 #include <QDebug>
 
 namespace Keycard {
@@ -15,6 +16,13 @@ constexpr uint8_t TAG_PUBLIC_KEY = 0x80;
 constexpr uint8_t TAG_VERSION = 0x02;
 constexpr uint8_t TAG_KEY_UID = 0x8E;
 constexpr uint8_t TAG_CAPABILITIES = 0x8D;
+constexpr uint8_t TAG_STATUS = 0x8C;       // applet 4.x
+constexpr uint8_t TAG_CERTIFICATE = 0x8A;  // applet 4.x
+
+constexpr uint8_t STATUS_INITIALIZED = 0x10;
+constexpr uint8_t STATUS_PIN_RETRIES_MASK = 0x0F;
+constexpr int IDENTITY_PUBLIC_KEY_SIZE = 33;
+constexpr int INSTANCE_UID_SIZE = 16;
 
 /**
  * @brief Find a TLV tag in data
@@ -27,12 +35,11 @@ bool findTag(const QByteArray& data, uint8_t tag, QByteArray& value) {
     int i = 0;
     while (i < data.size()) {
         uint8_t currentTag = static_cast<uint8_t>(data[i++]);
-        
+
         if (i >= data.size()) break;
-        
-        uint8_t length = static_cast<uint8_t>(data[i++]);
-        
-        // Handle extended length (TODO: implement properly)
+
+        int length = static_cast<uint8_t>(data[i++]);
+
         if (length == 0x81 && i < data.size()) {
             length = static_cast<uint8_t>(data[i++]);
         } else if (length == 0x82 && i + 1 < data.size()) {
@@ -75,8 +82,8 @@ bool findTagN(const QByteArray& data, int n, uint8_t parentTag, uint8_t childTag
         
         if (i >= parentData.size()) break;
         
-        uint8_t length = static_cast<uint8_t>(parentData[i++]);
-        
+        int length = static_cast<uint8_t>(parentData[i++]);
+
         if (length == 0x81 && i < parentData.size()) {
             length = static_cast<uint8_t>(parentData[i++]);
         } else if (length == 0x82 && i + 1 < parentData.size()) {
@@ -100,9 +107,49 @@ bool findTagN(const QByteArray& data, int n, uint8_t parentTag, uint8_t childTag
     return false;
 }
 
+/**
+ * @brief Let the application info template span the whole SELECT response
+ *
+ * Applet 4.x before 4.0.1 (status-keycard #133) writes the template length one byte short, so its
+ * last TLV, the identity certificate, seems to run past the template and is dropped. A SELECT
+ * response holds nothing but this template, so a declared length that stops short of the data is
+ * widened to it. Correct lengths are left as they are.
+ */
+QByteArray withTemplateSpanningResponse(const QByteArray& response) {
+    if (response.size() < 2 || static_cast<uint8_t>(response[0]) != TAG_APPLICATION_INFO_TEMPLATE) {
+        return response;
+    }
+    int headerSize = 2;
+    int declared = static_cast<uint8_t>(response[1]);
+    if (declared == 0x81) {
+        if (response.size() < 3) {
+            return response;
+        }
+        declared = static_cast<uint8_t>(response[2]);
+        headerSize = 3;
+    } else if (declared > 0x80) {
+        return response;
+    }
+
+    const int actual = response.size() - headerSize;
+    if (declared >= actual || actual > 0xFF) {
+        return response;
+    }
+    qWarning() << "ApplicationInfo: Template length" << declared << "shorter than the" << actual
+               << "bytes received (applet before 4.0.1), using the whole response";
+    QByteArray fixed(1, static_cast<char>(TAG_APPLICATION_INFO_TEMPLATE));
+    if (actual > 0x7F) {
+        fixed.append(static_cast<char>(0x81));
+    }
+    fixed.append(static_cast<char>(actual));
+    fixed.append(response.mid(headerSize));
+    return fixed;
+}
+
 } // anonymous namespace
 
-ApplicationInfo parseApplicationInfo(const QByteArray& data) {
+ApplicationInfo parseApplicationInfo(const QByteArray& response) {
+    const QByteArray data = withTemplateSpanningResponse(response);
     ApplicationInfo info;
     info.installed = true;
     
@@ -116,21 +163,62 @@ ApplicationInfo parseApplicationInfo(const QByteArray& data) {
     // Check if pre-initialized (card not set up yet)
     if (static_cast<uint8_t>(data[0]) == TAG_SELECT_RESPONSE_PRE_INITIALIZED) {
         qDebug() << "ApplicationInfo: Pre-initialized card detected";
-        info.secureChannelPublicKey = data.mid(2);
+        if (!findTag(data, TAG_SELECT_RESPONSE_PRE_INITIALIZED, info.secureChannelPublicKey)) {
+            info.secureChannelPublicKey = data.mid(2);
+        }
         return info;
     }
-    
-    // Initialized card
+
+    // Applet 3.x answers with the template only once initialized; applet 4.x always does
+    // and reports initialization in the status tag (handled below).
     info.initialized = true;
-    
+
     if (static_cast<uint8_t>(data[0]) != TAG_APPLICATION_INFO_TEMPLATE) {
         qWarning() << "ApplicationInfo: Wrong template tag:" << QString::number(data[0], 16);
         return info;
     }
-    
+
     // Extract fields from TLV structure
     QByteArray value;
-    
+
+    // Applet 4.x: SecureChannelV2, identity certificate instead of instance UID / SC key / slots
+    if (findTagN(data, 0, TAG_APPLICATION_INFO_TEMPLATE, TAG_VERSION, value)
+        && value.size() >= 2 && static_cast<uint8_t>(value[0]) >= 4) {
+        info.appVersion = static_cast<uint8_t>(value[0]);
+        info.appVersionMinor = static_cast<uint8_t>(value[1]);
+        info.secureChannelVersion = 2;
+        info.availableSlots = 0;
+
+        if (findTagN(data, 0, TAG_APPLICATION_INFO_TEMPLATE, TAG_STATUS, value) && !value.isEmpty()) {
+            info.appStatus = static_cast<uint8_t>(value[0]);
+        }
+        info.initialized = (info.appStatus & STATUS_INITIALIZED) != 0;
+        if (info.initialized) {
+            info.pinRetries = info.appStatus & STATUS_PIN_RETRIES_MASK;
+        }
+
+        if (findTagN(data, 0, TAG_APPLICATION_INFO_TEMPLATE, TAG_KEY_UID, value)) {
+            info.keyUID = value;
+        }
+        if (findTagN(data, 0, TAG_APPLICATION_INFO_TEMPLATE, TAG_CAPABILITIES, value) && !value.isEmpty()) {
+            info.capabilities = static_cast<uint8_t>(value[0]);
+        }
+        if (findTagN(data, 0, TAG_APPLICATION_INFO_TEMPLATE, TAG_CERTIFICATE, value)
+            && value.size() > IDENTITY_PUBLIC_KEY_SIZE) {
+            info.certificate = value;
+            info.identityPublicKey = value.left(IDENTITY_PUBLIC_KEY_SIZE);
+            // No instance UID on 4.x: derive a stable 16-byte one from the identity key, so callers
+            // keyed on the instance UID keep working and it survives factory reset.
+            info.instanceUID = QCryptographicHash::hash(info.identityPublicKey, QCryptographicHash::Sha256)
+                                   .left(INSTANCE_UID_SIZE);
+        }
+
+        qDebug() << "ApplicationInfo: Applet" << info.appVersion << "." << info.appVersionMinor
+                 << "(SecureChannelV2) initialized:" << info.initialized
+                 << "instance UID:" << info.instanceUID.toHex();
+        return info;
+    }
+
     // Instance UID (0x8F)
     if (findTagN(data, 0, TAG_APPLICATION_INFO_TEMPLATE, TAG_INSTANCE_UID, value)) {
         info.instanceUID = value;

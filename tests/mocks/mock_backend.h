@@ -138,6 +138,7 @@ public:
      * @return List of APDU commands sent via transmit()
      */
     QList<QByteArray> getTransmittedApdus() const { return m_transmittedApdus; }
+    void clearTransmittedApdus() { m_transmittedApdus.clear(); }
 
     /**
      * @brief Get count of transmitted APDUs

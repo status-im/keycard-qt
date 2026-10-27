@@ -47,6 +47,8 @@ set(KEYCARD_QT_SOURCES
     
     # Crypto
     src/crypto/secure_channel.cpp
+    src/crypto/secure_channel_v2.cpp
+    src/crypto/sc_v2_crypto.cpp
     
     # GlobalPlatform
     src/globalplatform/gp_crypto.cpp
@@ -78,6 +80,8 @@ set(KEYCARD_QT_HEADERS
     include/keycard-qt/keycard_channel.h
     include/keycard-qt/command_set.h
     include/keycard-qt/secure_channel.h
+    include/keycard-qt/secure_channel_v2.h
+    include/keycard-qt/sc_v2_crypto.h
     include/keycard-qt/types.h
     include/keycard-qt/apdu/command.h
     include/keycard-qt/apdu/response.h
