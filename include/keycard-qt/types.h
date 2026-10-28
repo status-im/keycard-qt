@@ -35,11 +35,11 @@ struct ApplicationInfo {
     uint8_t capabilities;             ///< Capability flags (bitmask)
     uint8_t secureChannelVersion;     ///< 1 = password pairing (applet 3.x), 2 = SecureChannelV2 (applet 4.x)
     uint8_t appStatus;                ///< Applet 4.x status byte (tag 8C): initialized, LEE mode, PIN retries
-    QByteArray certificate;           ///< Applet 4.x identity certificate (tag 8A, 98 bytes)
-    QByteArray identityPublicKey;     ///< Applet 4.x identity key (compressed, first 33 bytes of the certificate)
+    QByteArray certificate;           ///< Identity certificate (98 bytes): 4.x SELECT tag 8A, 3.x IDENTIFY
+    QByteArray identityPublicKey;     ///< Identity key (compressed, first 33 bytes of the certificate)
     int pinRetries;                   ///< PIN retries from SELECT (applet 4.x only), -1 when not reported
-    /// False when an applet 4.x card's identity certificate is not signed by a trusted CA (development
-    /// or custom-made cards). Informational: such cards still work. Always true for applet 3.x.
+    /// False when the card's identity certificate is missing or not signed by a trusted CA (development
+    /// or custom-made cards). Informational: such cards still work.
     bool certificateTrusted;
 
     ApplicationInfo()
