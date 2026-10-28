@@ -3,6 +3,7 @@
 
 #include "keycard-qt/backends/keycard_channel_pcsc.h"
 #include <QDebug>
+#include <QHash>
 #include <QMutexLocker>
 #include <stdexcept>
 #include <vector>
@@ -490,7 +491,12 @@ void KeycardChannelPcsc::detectionLoop()
     // Matching Go's two-phase detection pattern:
     // Phase 1: detectionRoutine() - wait for card insertion
     // Phase 2: watchActiveReader() - monitor card until removed
-    
+
+    // Reader -> its state when connecting to the card failed. That card is not retried until the
+    // reader state changes (card reinserted, or it starts answering): retrying at once spins on an
+    // unresponsive card and reports the same failure many times a second.
+    QHash<QString, DWORD> failedConnectState;
+
     while (m_stopDetection.loadAcquire() == 0) {
         // Check for force scan request
         if (m_forceScan.loadAcquire() == 1) {
@@ -584,11 +590,18 @@ void KeycardChannelPcsc::detectionLoop()
             size_t numActualReaders = readerStates.size() - 1;  // Exclude PnP reader
             
             for (size_t i = 0; i < numActualReaders; ++i) {
-                if (readerStates[i].dwEventState & SCARD_STATE_PRESENT) {
-                    foundCard = true;
-                    cardReaderIndex = i;
-                    break;
+                const DWORD state = readerStates[i].dwEventState;
+                if (!(state & SCARD_STATE_PRESENT)) {
+                    failedConnectState.remove(readers[i]);
+                    continue;
                 }
+                const auto failed = failedConnectState.constFind(readers[i]);
+                if (failed != failedConnectState.constEnd() && failed.value() == (state & ~SCARD_STATE_CHANGED)) {
+                    continue;  // same card that failed to connect: wait for a state change
+                }
+                foundCard = true;
+                cardReaderIndex = i;
+                break;
             }
             
             // Check for reader removal BEFORE waiting (check state flags)
@@ -641,14 +654,16 @@ void KeycardChannelPcsc::detectionLoop()
                     // go back to detection phase
                     continue;
                 } else {
-                    // Failed to connect - break inner loop to re-enumerate readers
-                    // This prevents infinite loop when PC/SC reports card present
-                    // but connection fails (e.g. SCARD_W_REMOVED_CARD)
-                    // Emit error signal so upper layers (SessionManager) can set
-                    // ConnectionError state instead of silently retrying.
-                    qDebug() << "KeycardChannelPcsc: Connection failed, emitting error and breaking to re-enumerate";
+                    // Report the failure once and wait for this reader's state to change before
+                    // retrying (see failedConnectState). Upper layers (SessionManager) set
+                    // ConnectionError from the error signal.
+                    const DWORD state = readerStates[cardReaderIndex].dwEventState;
+                    failedConnectState.insert(readerName, state & ~SCARD_STATE_CHANGED);
+                    qWarning() << "KeycardChannelPcsc: Connection failed, waiting for the card to be reinserted."
+                               << "Reader state:" << QString("0x%1").arg(state, 0, 16)
+                               << ((state & SCARD_STATE_MUTE) ? "(card not responding)" : "");
                     emit error("Failed to connect to card in reader: " + readerName);
-                    break;
+                    continue;
                 }
             }
             
