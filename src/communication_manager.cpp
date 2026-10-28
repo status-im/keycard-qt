@@ -582,11 +582,6 @@ CardInitializationResult CommunicationManager::initializeCardSequence() {
         return CardInitializationResult::fromError("Failed to select applet");
     }
 
-    // Applet 4.x: refuse a card whose identity certificate no trusted CA signed, blank or not
-    if (!m_commandSet->isCardTrusted()) {
-        return CardInitializationResult::fromError(QString::fromLatin1(Errors::UntrustedCard), appInfo);
-    }
-
     // Check if card is initialized
     if (!appInfo.initialized) {
         qDebug() << "   Card is empty (not initialized)";
