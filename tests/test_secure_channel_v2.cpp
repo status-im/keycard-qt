@@ -464,14 +464,20 @@ private slots:
 
     // ---- CommandSet against the emulator ----
 
-    void testUntrustedCardNeverOpens() {
+    void testUnknownCaCardIsUsable() {
+        // Development or custom-made cards: reported, never refused
         m_cmdSet->setTrustedCaKeys({ ScV2::keyPairFromPrivateKey(otherCaPrivateKey()).publicKey });
-        m_card->initialized = true;
-        m_cmdSet->select(true);
+        openInitializedCard();
         QVERIFY(!m_cmdSet->isCardTrusted());
-        QVERIFY(!m_cmdSet->ensureSecureChannel());
-        QCOMPARE(m_cmdSet->lastError(), QString::fromLatin1(Errors::UntrustedCard));
-        QCOMPARE(countInstruction(APDU::INS_OPEN_SECURE_CHANNEL), 0);
+        QVERIFY(!m_cmdSet->applicationInfo().certificateTrusted);
+        QVERIFY(m_cmdSet->testSecureChannelIsOpen());
+        QVERIFY(m_cmdSet->getStatus().valid);
+    }
+
+    void testTrustedCaCardIsReportedTrusted() {
+        m_cmdSet->select(true);
+        QVERIFY(m_cmdSet->isCardTrusted());
+        QVERIFY(m_cmdSet->applicationInfo().certificateTrusted);
     }
 
     void testDefaultTrustRejectsUnknownCa() {
@@ -480,13 +486,13 @@ private slots:
         QVERIFY(!m_cmdSet->isCardTrusted());
     }
 
-    void testWrongTranscriptSignatureIsUntrusted() {
+    void testWrongTranscriptSignatureFailsAuthentication() {
         m_card->initialized = true;
         m_card->signWrongTranscript = true;
         m_cmdSet->select(true);
         QVERIFY(m_cmdSet->isCardTrusted());
         QVERIFY(!m_cmdSet->ensureSecureChannel());
-        QCOMPARE(m_cmdSet->lastError(), QString::fromLatin1(Errors::UntrustedCard));
+        QCOMPARE(m_cmdSet->lastError(), QString::fromLatin1(Errors::CardAuthenticationFailed));
         QVERIFY(!m_cmdSet->testSecureChannelIsOpen());
     }
 

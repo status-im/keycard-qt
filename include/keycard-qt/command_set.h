@@ -350,10 +350,11 @@ public:
     void setTrustedCaKeys(const QList<QByteArray>& caKeys);
 
     /**
-     * @brief False when the selected applet 4.x card's certificate is not signed by a trusted CA.
+     * @brief False when the selected applet 4.x card's certificate is not signed by a trusted CA
+     * (development or custom-made cards). Informational only: such cards are fully usable.
      * Applet 3.x cards carry no certificate and are always reported trusted.
      */
-    bool isCardTrusted() const { return m_cardTrusted; }
+    bool isCardTrusted() const { return m_appInfo.certificateTrusted; }
 
     // Accessors
     ApplicationInfo applicationInfo() const { return m_appInfo; }
@@ -549,7 +550,7 @@ private:
     /** Fails (sets lastError, returns true) when an applet-3.x-only command is used on applet 4.x. */
     bool rejectOnSecureChannelV2(const char* operation);
 
-    /** Re-evaluate m_cardTrusted for the selected card. */
+    /** Re-evaluate ApplicationInfo::certificateTrusted for the selected card. */
     void updateCardTrust();
 
     /** Common tail of init(): cache the PIN, reopen the secure channel and cache the status. */
@@ -580,7 +581,6 @@ private:
     QSharedPointer<SecureChannel> m_secureChannel;      // applet 3.x
     QSharedPointer<SecureChannelV2> m_secureChannelV2;  // applet 4.x
     QList<QByteArray> m_trustedCaKeys;
-    bool m_cardTrusted = true;
     ApplicationInfo m_appInfo;
     PairingInfo m_pairingInfo;
     /** Hex instance UID of the applet m_pairingInfo was loaded/opened for; invalidates fast-path if select() sees another card. */

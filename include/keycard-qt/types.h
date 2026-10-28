@@ -38,6 +38,9 @@ struct ApplicationInfo {
     QByteArray certificate;           ///< Applet 4.x identity certificate (tag 8A, 98 bytes)
     QByteArray identityPublicKey;     ///< Applet 4.x identity key (compressed, first 33 bytes of the certificate)
     int pinRetries;                   ///< PIN retries from SELECT (applet 4.x only), -1 when not reported
+    /// False when an applet 4.x card's identity certificate is not signed by a trusted CA (development
+    /// or custom-made cards). Informational: such cards still work. Always true for applet 3.x.
+    bool certificateTrusted;
 
     ApplicationInfo()
         : appVersion(0)
@@ -49,6 +52,7 @@ struct ApplicationInfo {
         , secureChannelVersion(1)
         , appStatus(0)
         , pinRetries(-1)
+        , certificateTrusted(true)
     {}
 
     /**
@@ -245,9 +249,12 @@ namespace APDU {
 }
 
 namespace Errors {
-    /// Reported (as lastError / CardInitializationResult::error) when an applet 4.x card's identity
-    /// certificate is not signed by a trusted CA, or its secure-channel signature does not verify.
-    constexpr const char* UntrustedCard = "Untrusted keycard: identity certificate not trusted";
+    /// Reported (as lastError / CardInitializationResult::error) when an applet 4.x card's
+    /// secure-channel signature does not verify against the identity key in its own certificate:
+    /// the channel is not with the card that certificate belongs to. A certificate from an unknown
+    /// CA is not an error (see ApplicationInfo::certificateTrusted).
+    constexpr const char* CardAuthenticationFailed =
+        "Keycard authentication failed: secure channel not signed by the card's identity key";
 }
 
 } // namespace Keycard

@@ -171,14 +171,14 @@ void CommandSet::setTrustedCaKeys(const QList<QByteArray>& caKeys)
 void CommandSet::updateCardTrust()
 {
     if (!usesSecureChannelV2()) {
-        m_cardTrusted = true;
+        m_appInfo.certificateTrusted = true;
         return;
     }
     const ScV2::Certificate certificate = ScV2::Certificate::parse(m_appInfo.certificate);
-    m_cardTrusted = certificate.isTrustedBy(m_trustedCaKeys);
-    if (!m_cardTrusted) {
-        qWarning() << "CommandSet: Card certificate is not signed by a trusted CA, recovered CA key:"
-                   << certificate.recoverCaPublicKey().toHex();
+    m_appInfo.certificateTrusted = certificate.isTrustedBy(m_trustedCaKeys);
+    if (!m_appInfo.certificateTrusted) {
+        qWarning() << "CommandSet: Card certificate is not signed by a trusted CA (development or custom card?),"
+                   << "recovered CA key:" << certificate.recoverCaPublicKey().toHex();
     }
 }
 
@@ -477,10 +477,6 @@ bool CommandSet::openSecureChannelV2()
         return false;
     };
 
-    if (!m_cardTrusted) {
-        return failOpen(QString::fromLatin1(Errors::UntrustedCard));
-    }
-
     const QByteArray data = m_secureChannelV2->prepareOpen();
     if (data.isEmpty()) {
         return failOpen(QStringLiteral("Failed to generate ECDH key"));
@@ -495,7 +491,7 @@ bool CommandSet::openSecureChannelV2()
     case SecureChannelV2::OpenResult::Opened:
         break;
     case SecureChannelV2::OpenResult::InvalidSignature:
-        return failOpen(QString::fromLatin1(Errors::UntrustedCard));
+        return failOpen(QString::fromLatin1(Errors::CardAuthenticationFailed));
     case SecureChannelV2::OpenResult::InvalidResponse:
         return failOpen(QStringLiteral("Invalid OPEN_SECURE_CHANNEL response"));
     }
