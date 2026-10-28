@@ -127,7 +127,16 @@ void CommandSet::clearStaleCardSessionState()
     m_hasCachedStatus = false;
     m_cachedStatus = ApplicationStatus();
     invalidateCachedPairing();
+    forgetIdentifiedCard();
     m_needsSecureChannelReestablishment = true;
+}
+
+void CommandSet::forgetIdentifiedCard()
+{
+    // The instance UID comes from an unauthenticated SELECT, so a verified identity only holds for the
+    // connection it was verified on: a card inserted later must answer a fresh challenge
+    m_identifiedInstanceUID.clear();
+    m_identifiedCertificate.clear();
 }
 
 bool CommandSet::checkOK(const APDU::Response& response)
@@ -168,12 +177,54 @@ void CommandSet::setTrustedCaKeys(const QList<QByteArray>& caKeys)
     updateCardTrust();
 }
 
-void CommandSet::updateCardTrust()
+void CommandSet::identifyCardV1()
 {
-    if (!usesSecureChannelV2()) {
-        m_appInfo.certificateTrusted = true;
+    // Applet 3.x hands out its identity certificate via IDENTIFY, signing our challenge (as a hash)
+    // with the identity key: A0 [81] L | 8A 62 <certificate> | <DER signature>
+    QByteArray challenge(32, 0);
+    QRandomGenerator::system()->fillRange(reinterpret_cast<quint32*>(challenge.data()),
+                                          challenge.size() / static_cast<int>(sizeof(quint32)));
+    // Identification is advisory: a card without a certificate (SW 6985) must not fail the caller's
+    // operation through lastError
+    const QString previousError = m_lastError;
+    QByteArray response;
+    try {
+        response = identify(challenge);
+    } catch (const std::exception& e) {
+        m_lastError = previousError;
+        qWarning() << "CommandSet: IDENTIFY failed:" << e.what();
+        return;  // not cached: retried on the next SELECT
+    }
+    m_lastError = previousError;
+    // Once per connection: SELECT runs often, the certificate never changes
+    m_identifiedInstanceUID = m_appInfo.instanceUID;
+    m_identifiedCertificate.clear();
+
+    int offset = 2;
+    if (response.size() > 2 && static_cast<uint8_t>(response[1]) == 0x81) {
+        offset = 3;
+    }
+    if (response.size() < offset + 2 + ScV2::CertificateSize
+        || static_cast<uint8_t>(response[0]) != 0xA0
+        || static_cast<uint8_t>(response[offset]) != 0x8A
+        || static_cast<uint8_t>(response[offset + 1]) != ScV2::CertificateSize) {
+        qWarning() << "CommandSet: Card has no identity certificate (IDENTIFY answered" << response.toHex() << ")";
         return;
     }
+    const QByteArray certificate = response.mid(offset + 2, ScV2::CertificateSize);
+    const QByteArray signature = response.mid(offset + 2 + ScV2::CertificateSize);
+    const QByteArray identityPublicKey = certificate.left(ScV2::CompressedPublicKeySize);
+    if (!ScV2::verifySignature(identityPublicKey, challenge, signature)) {
+        qWarning() << "CommandSet: IDENTIFY signature does not match the card's identity certificate";
+        return;
+    }
+    m_identifiedCertificate = certificate;
+    m_appInfo.certificate = certificate;
+    m_appInfo.identityPublicKey = identityPublicKey;
+}
+
+void CommandSet::updateCardTrust()
+{
     const ScV2::Certificate certificate = ScV2::Certificate::parse(m_appInfo.certificate);
     m_appInfo.certificateTrusted = certificate.isTrustedBy(m_trustedCaKeys);
     if (!m_appInfo.certificateTrusted) {
@@ -245,6 +296,16 @@ ApplicationInfo CommandSet::select(bool force)
     }
     qDebug() << "CommandSet: Card selected, UID:" << m_cardInstanceUID;
 
+    // Every applet 3.x SELECT reply, blank or initialized, carries the secure channel key
+    if (!usesSecureChannelV2() && !m_appInfo.secureChannelPublicKey.isEmpty()) {
+        // A blank 3.x card has no instance UID to cache by, so it is identified on every SELECT until INIT
+        if (!m_appInfo.instanceUID.isEmpty() && m_appInfo.instanceUID == m_identifiedInstanceUID) {
+            m_appInfo.certificate = m_identifiedCertificate;
+            m_appInfo.identityPublicKey = m_identifiedCertificate.left(ScV2::CompressedPublicKeySize);
+        } else {
+            identifyCardV1();
+        }
+    }
     updateCardTrust();
 
     // Generate ECDH secret if card supports secure channel (applet 3.x; 4.x keys are per OPEN)
@@ -1752,6 +1813,7 @@ void CommandSet::onTargetDetected(const QString& uid) {
         // Same card re-detected - crypto reset only
         qDebug() << "CommandSet: Same card re-detected";
         resetSecureChannel();  // Preserves pairing and auth state
+        forgetIdentifiedCard();
     }
     m_cardReady.store(true);
     emit cardReady(uid);
@@ -1762,6 +1824,7 @@ void CommandSet::onTargetLost() {
              << "(thread:" << QThread::currentThreadId() << ")";
     
     resetSecureChannel();
+    forgetIdentifiedCard();
     m_cardReady.store(false);
     // Notify card loss only if we had a card before
     if (!m_targetId.isEmpty()) {

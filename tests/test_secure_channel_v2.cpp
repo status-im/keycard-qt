@@ -389,6 +389,124 @@ private slots:
         QVERIFY2(threw, "the reply of a reset session must be rejected");
     }
 
+    // ---- Applet 3.x identity (IDENTIFY) ----
+
+    /// An initialized applet 3.x card whose IDENTIFY answers with @p certificate, signing the challenge
+    /// with @p identityPrivateKey; an empty certificate answers 6985 (no certificate)
+    void installV1Card(const QByteArray& certificate, const QByteArray& identityPrivateKey, int* identifyCount,
+                       bool initialized = true) {
+        const QByteArray scKey = ScV2::generateKeyPair().publicKey;
+        m_mock->setResponseHandler([=](const QByteArray& apdu) {
+            const uint8_t ins = static_cast<uint8_t>(apdu.at(1));
+            if (ins == APDU::INS_SELECT) {
+                if (!initialized) {
+                    return QByteArray::fromHex("8041") + scKey + QByteArray::fromHex("9000");
+                }
+                const QByteArray body = QByteArray::fromHex("8f10") + QByteArray(16, 0x11) + QByteArray::fromHex("8041")
+                    + scKey + QByteArray::fromHex("02020302020103" "8d013f");
+                return QByteArray::fromHex("a4") + QByteArray(1, char(body.size())) + body + QByteArray::fromHex("9000");
+            }
+            if (ins == APDU::INS_IDENTIFY) {
+                ++*identifyCount;
+                if (certificate.isEmpty()) {
+                    return QByteArray::fromHex("6985");
+                }
+                const QByteArray challenge = apdu.mid(5, static_cast<uint8_t>(apdu.at(4)));
+                const QByteArray inner = QByteArray::fromHex("8a62") + certificate
+                    + ScV2::sign(identityPrivateKey, challenge).der;
+                return QByteArray::fromHex("a081") + QByteArray(1, char(inner.size())) + inner + QByteArray::fromHex("9000");
+            }
+            return QByteArray::fromHex("9000");
+        });
+    }
+
+    void testV1CardIdentifiedByTrustedCa() {
+        const ScV2::KeyPair identity = ScV2::generateKeyPair();
+        int identifies = 0;
+        installV1Card(ScV2::Certificate::create(testCaPrivateKey(), identity.publicKey), identity.privateKey, &identifies);
+
+        m_cmdSet->select(true);
+        QVERIFY(!m_cmdSet->applicationInfo().usesSecureChannelV2());
+        QVERIFY(m_cmdSet->isCardTrusted());
+        QCOMPARE(m_cmdSet->applicationInfo().identityPublicKey, ScV2::compressPublicKey(identity.publicKey));
+        QCOMPARE(m_cmdSet->applicationInfo().instanceUID, QByteArray(16, 0x11));  // 3.x keeps its own UID
+        QCOMPARE(identifies, 1);
+
+        // Identified once per card: SELECT runs often
+        m_cmdSet->select(true);
+        QVERIFY(m_cmdSet->isCardTrusted());
+        QCOMPARE(identifies, 1);
+    }
+
+    void testV1ReplacementWithSameUidIsIdentifiedAgain() {
+        const ScV2::KeyPair identity = ScV2::generateKeyPair();
+        int identifies = 0;
+        installV1Card(ScV2::Certificate::create(testCaPrivateKey(), identity.publicKey), identity.privateKey, &identifies);
+        m_cmdSet->select(true);
+        QVERIFY(m_cmdSet->isCardTrusted());
+
+        // The SELECT UID is unauthenticated: a replacement claiming it must not inherit the verified identity
+        m_mock->simulateCardRemoved();
+        QCoreApplication::processEvents();
+        int replacementIdentifies = 0;
+        installV1Card(QByteArray(), QByteArray(), &replacementIdentifies);
+        m_mock->simulateCardInserted();
+        QCoreApplication::processEvents();
+
+        m_cmdSet->select(true);
+        QCOMPARE(m_cmdSet->applicationInfo().instanceUID, QByteArray(16, 0x11));
+        QCOMPARE(replacementIdentifies, 1);
+        QVERIFY(!m_cmdSet->isCardTrusted());
+        QVERIFY(m_cmdSet->applicationInfo().certificate.isEmpty());
+    }
+
+    void testV1CardFromUnknownCa() {
+        const ScV2::KeyPair identity = ScV2::generateKeyPair();
+        int identifies = 0;
+        installV1Card(ScV2::Certificate::create(otherCaPrivateKey(), identity.publicKey), identity.privateKey, &identifies);
+        m_cmdSet->select(true);
+        QVERIFY(!m_cmdSet->isCardTrusted());
+        QCOMPARE(identifies, 1);
+    }
+
+    void testV1CardWithoutCertificate() {
+        int identifies = 0;
+        installV1Card(QByteArray(), QByteArray(), &identifies);
+        m_cmdSet->select(true);
+        QVERIFY(!m_cmdSet->isCardTrusted());
+        QVERIFY(m_cmdSet->applicationInfo().certificate.isEmpty());
+        // IDENTIFY's 6985 is advisory and must not surface as the caller's error
+        QVERIFY2(m_cmdSet->lastError().isEmpty(), qPrintable(m_cmdSet->lastError()));
+    }
+
+    void testV1CardSigningWithAnotherKey() {
+        // The certificate is genuine, but the card does not hold its identity key
+        const ScV2::KeyPair identity = ScV2::generateKeyPair();
+        int identifies = 0;
+        installV1Card(ScV2::Certificate::create(testCaPrivateKey(), identity.publicKey),
+                      ScV2::generateKeyPair().privateKey, &identifies);
+        m_cmdSet->select(true);
+        QVERIFY(!m_cmdSet->isCardTrusted());
+        QVERIFY(m_cmdSet->applicationInfo().certificate.isEmpty());
+    }
+
+    void testBlankV1CardIsIdentified() {
+        // 3.x answers IDENTIFY before INIT too, so a blank card's CA is known up front, as on 4.x
+        const ScV2::KeyPair identity = ScV2::generateKeyPair();
+        int identifies = 0;
+        installV1Card(ScV2::Certificate::create(otherCaPrivateKey(), identity.publicKey), identity.privateKey,
+                      &identifies, false);
+        m_cmdSet->select(true);
+        QVERIFY(!m_cmdSet->applicationInfo().initialized);
+        QVERIFY(!m_cmdSet->isCardTrusted());
+        QCOMPARE(m_cmdSet->applicationInfo().identityPublicKey, ScV2::compressPublicKey(identity.publicKey));
+        QCOMPARE(identifies, 1);
+
+        // No instance UID to cache by: another blank card may be behind the next SELECT
+        m_cmdSet->select(true);
+        QCOMPARE(identifies, 2);
+    }
+
     // ---- SELECT parsing ----
 
     void testParseBlankSelect() {

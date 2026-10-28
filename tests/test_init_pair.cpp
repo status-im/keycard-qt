@@ -224,6 +224,7 @@ private slots:
                                    QByteArray::fromHex("8040") + QByteArray(65, 0xBB) +
                                    QByteArray::fromHex("9000");
         mock->queueResponse(selectResponse);
+        mock->queueResponse(QByteArray::fromHex("6985"));  // IDENTIFY: no identity certificate
         
         QByteArray wrongCryptogram(32, 0xFF);
         QByteArray challenge(32, 0xDD);

@@ -345,14 +345,13 @@ public:
     bool ensureSecureChannel();
     
     /**
-     * @brief CA keys accepted for applet 4.x identity certificates (defaults to defaultTrustedCaKeys())
+     * @brief CA keys accepted for card identity certificates (defaults to defaultTrustedCaKeys())
      */
     void setTrustedCaKeys(const QList<QByteArray>& caKeys);
 
     /**
-     * @brief False when the selected applet 4.x card's certificate is not signed by a trusted CA
-     * (development or custom-made cards). Informational only: such cards are fully usable.
-     * Applet 3.x cards carry no certificate and are always reported trusted.
+     * @brief False when the selected card's identity certificate is missing or not signed by a trusted
+     * CA (development or custom-made cards). Informational only: such cards are fully usable.
      */
     bool isCardTrusted() const { return m_appInfo.certificateTrusted; }
 
@@ -553,6 +552,9 @@ private:
     /** Re-evaluate ApplicationInfo::certificateTrusted for the selected card. */
     void updateCardTrust();
 
+    /** Applet 3.x: read and verify the identity certificate via IDENTIFY (4.x reports it in SELECT). */
+    void identifyCardV1();
+
     /** Common tail of init(): cache the PIN, reopen the secure channel and cache the status. */
     bool finishInit(const Secrets& secrets);
 
@@ -572,6 +574,8 @@ private:
      * (same PC/SC target id, different Keycard).
      */
     void clearStaleCardSessionState();
+    /** Drop the IDENTIFY result cached for the connected card. */
+    void forgetIdentifiedCard();
 
     
     std::shared_ptr<Keycard::KeycardChannel> m_channel;
@@ -581,6 +585,9 @@ private:
     QSharedPointer<SecureChannel> m_secureChannel;      // applet 3.x
     QSharedPointer<SecureChannelV2> m_secureChannelV2;  // applet 4.x
     QList<QByteArray> m_trustedCaKeys;
+    // Applet 3.x identity certificate from IDENTIFY, for the card instance it was read from
+    QByteArray m_identifiedInstanceUID;
+    QByteArray m_identifiedCertificate;
     ApplicationInfo m_appInfo;
     PairingInfo m_pairingInfo;
     /** Hex instance UID of the applet m_pairingInfo was loaded/opened for; invalidates fast-path if select() sees another card. */
