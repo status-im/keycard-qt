@@ -130,6 +130,11 @@ void CommunicationManager::cancelPendingOperations(const QString& reason) {
     if (!m_running) {
         return;
     }
+    // A command already running may be blocked waiting for a card, on the thread this cancellation is
+    // queued to; release it directly so it fails instead of waiting for a card that is not coming.
+    if (m_commandSet) {
+        m_commandSet->abortWaitForCard();
+    }
     if (QThread::currentThread() == thread()) {
         cancelPendingOperationsInternal(reason);
         return;
@@ -320,6 +325,11 @@ QUuid CommunicationManager::enqueueCommand(std::unique_ptr<CardCommand> cmd) {
     QString cmdName = cmd->name();
     
     qDebug() << "CommunicationManager: Enqueueing command" << cmdName << "token:" << token;
+
+    // A new operation starts: an abort meant for an earlier, cancelled one must not end its waits
+    if (m_commandSet) {
+        m_commandSet->clearWaitForCardAbort();
+    }
     
     {
         QMutexLocker locker(&m_queueMutex);

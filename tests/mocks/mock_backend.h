@@ -194,6 +194,12 @@ public:
     void setInsertionDelay(int delayMs) { m_insertionDelay = delayMs; }
 
     /**
+     * @brief Whether a card is reinserted as soon as the lib waits for one (default true), so
+     * waitForCard() never blocks. Off: the wait lasts until simulateCardInserted().
+     */
+    void setReconnectWhenWaiting(bool reconnect) { m_reconnectWhenWaiting = reconnect; }
+
+    /**
      * @brief Enable/disable thread-safe mode
      * @param threadSafe If true, uses mutexes for all operations
      * 
@@ -244,6 +250,7 @@ private:
     // Threading enhancements
     int m_transmitDelay = 0;
     int m_insertionDelay = 0;
+    bool m_reconnectWhenWaiting = true;
     bool m_threadSafe = false;
     mutable QMutex m_mutex;
 

@@ -122,7 +122,7 @@ bool MockBackend::isConnected() const
 {
     // Only auto-reconnect if we're waiting for a card (for testing)
     // This ensures waitForCard() doesn't hang, but allows tests to check disconnected state
-    if (!m_connected && m_state == ChannelState::WaitingForCard) {
+    if (!m_connected && m_state == ChannelState::WaitingForCard && m_reconnectWhenWaiting) {
         qDebug() << "[MockBackend] Auto-reconnecting card (waiting for card, mock should always be available)";
         // Use const_cast to allow modification (this is safe in tests)
         const_cast<MockBackend*>(this)->simulateCardInserted();
@@ -238,7 +238,7 @@ void MockBackend::setState(ChannelState state)
     // Auto-reconnect when waiting for card (for testing)
     // This ensures waitForCard() doesn't hang in tests - the mock should always
     // have a card available when waiting
-    if (state == ChannelState::WaitingForCard && !m_connected) {
+    if (state == ChannelState::WaitingForCard && !m_connected && m_reconnectWhenWaiting) {
         qDebug() << "[MockBackend] State set to WaitingForCard, auto-reconnecting card";
         // Reconnect immediately so waitForCard() can return
         simulateCardInserted();
@@ -265,6 +265,7 @@ void MockBackend::reset()
     QMutexLocker locker(m_threadSafe ? &m_mutex : nullptr);
 
     qDebug() << "[MockBackend] Resetting state";
+    m_reconnectWhenWaiting = true;
 
     // Stop detection
     if (m_detecting) {
