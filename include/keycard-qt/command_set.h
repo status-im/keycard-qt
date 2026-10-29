@@ -320,9 +320,21 @@ public:
     /**
      * @brief Wait for card to be present
      * Checks if card is connected, enables card detection if needed, and waits for card
-     * @return true if card detected, false on error or when detection stops
+     * @return true if card detected, false on error, when detection stops or when the wait is aborted
      */
     bool waitForCard();
+
+    /**
+     * @brief Make the current or next waitForCard() give up (thread-safe): the operation waiting for
+     * a card was cancelled, e.g. because the card was removed. Consumed by the wait it aborts.
+     */
+    void abortWaitForCard();
+
+    /**
+     * @brief Withdraw an abort that no wait consumed (thread-safe), so it cannot cut short the wait of
+     * an operation started after it.
+     */
+    void clearWaitForCardAbort();
 
     /**
      * @brief Ensure pairing is available for current card
@@ -607,6 +619,7 @@ private:
     
 
     std::atomic_bool m_cardReady = false;
+    std::atomic_bool m_waitForCardAborted = false;  // see abortWaitForCard()
 };
 
 } // namespace Keycard

@@ -11,6 +11,7 @@
 #include <QIODevice>
 #include <QThread>
 #include <QEventLoop>
+#include <QTimer>
 #include <QMetaObject>
 #include <QWaitCondition>
 #include <QCoreApplication>
@@ -1619,10 +1620,29 @@ bool CommandSet::waitForCard()
         return true;
     }
 
+    if (m_waitForCardAborted.exchange(false)) {
+        qDebug() << "CommandSet::waitForCard(): Aborted, the operation was cancelled";
+        m_lastError = QStringLiteral("Waiting for the card was cancelled");
+        return false;
+    }
+
     QEventLoop loop;
     bool cardDetected = false;
     bool detectionStopped = false;
+    bool aborted = false;
     QString waitError;
+
+    // Exit when the operation is cancelled (abortWaitForCard()). Polled rather than signalled: the
+    // abort comes from another thread, and a timer fires in this nested loop regardless of which
+    // posted events it gets to deliver.
+    QTimer abortPoll;
+    abortPoll.setInterval(50);
+    QObject::connect(&abortPoll, &QTimer::timeout, &loop, [this, &loop, &aborted]() {
+        if (m_waitForCardAborted.exchange(false)) {
+            aborted = true;
+            loop.quit();
+        }
+    });
 
     // Exit when a target is detected.
     QMetaObject::Connection cardConnection = QObject::connect(
@@ -1672,12 +1692,20 @@ bool CommandSet::waitForCard()
     }
 
     // Enter event loop
+    abortPoll.start();
     loop.exec();
+    abortPoll.stop();
 
     // Clean up connections
     QObject::disconnect(cardConnection);
     QObject::disconnect(errorConnection);
     QObject::disconnect(detectionStoppedConnection);
+
+    if (aborted) {
+        qDebug() << "CommandSet::waitForCard(): Aborted, the operation was cancelled";
+        m_lastError = QStringLiteral("Waiting for the card was cancelled");
+        return false;
+    }
 
     if (cardDetected) {
         qDebug() << "CommandSet::waitForCard(): Card successfully detected";
@@ -1772,6 +1800,16 @@ APDU::Response CommandSet::send(const APDU::Command& cmd, bool secure)
 }
 
 // ========== Channel Management Implementation ==========
+
+void CommandSet::abortWaitForCard()
+{
+    m_waitForCardAborted = true;
+}
+
+void CommandSet::clearWaitForCardAbort()
+{
+    m_waitForCardAborted = false;
+}
 
 void CommandSet::startDetection() {
     qDebug() << "CommandSet::startDetection()";

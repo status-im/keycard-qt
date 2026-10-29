@@ -5,6 +5,9 @@
 #include <QCryptographicHash>
 #include <QMessageAuthenticationCode>
 #include <QSemaphore>
+#include <QElapsedTimer>
+#include <QThread>
+#include <QTimer>
 #include <QVector>
 #include <atomic>
 #include <memory>
@@ -539,6 +542,56 @@ private slots:
         m_mock->queueResponse(QByteArray::fromHex("6D00"));
         m_cmdSet->select();
         QVERIFY(m_cmdSet->lastError().contains("6d00"));
+    }
+
+    // ---- Aborting a wait for the card (operation cancelled, e.g. card removed) ----
+
+    void testWaitForCardAbortedWhileWaiting() {
+        m_mock->setReconnectWhenWaiting(false);
+        m_mock->simulateCardRemoved();
+
+        std::thread canceller([this]() {
+            QThread::msleep(100);
+            m_cmdSet->abortWaitForCard();
+        });
+        QElapsedTimer elapsed;
+        elapsed.start();
+        const bool cardFound = m_cmdSet->waitForCard();
+        canceller.join();
+
+        QVERIFY(!cardFound);
+        QVERIFY2(elapsed.elapsed() < 2000, qPrintable(QString::number(elapsed.elapsed())));
+    }
+
+    void testWaitForCardAbortedBeforeWaiting() {
+        // The cancellation can come before the command reaches its wait
+        m_mock->setReconnectWhenWaiting(false);
+        m_mock->simulateCardRemoved();
+
+        m_cmdSet->abortWaitForCard();
+        QVERIFY(!m_cmdSet->waitForCard());
+    }
+
+    void testWaitForCardAbortIsConsumed() {
+        m_mock->setReconnectWhenWaiting(false);
+        m_mock->simulateCardRemoved();
+        m_cmdSet->abortWaitForCard();
+        QVERIFY(!m_cmdSet->waitForCard());
+
+        // The next wait is not aborted: it lasts until a card arrives
+        QTimer::singleShot(100, m_mock, &MockBackend::simulateCardInserted);
+        QVERIFY(m_cmdSet->waitForCard());
+    }
+
+    void testClearedWaitForCardAbortDoesNotEndWait() {
+        // A new operation withdraws an abort no wait consumed
+        m_mock->setReconnectWhenWaiting(false);
+        m_mock->simulateCardRemoved();
+        m_cmdSet->abortWaitForCard();
+        m_cmdSet->clearWaitForCardAbort();
+
+        QTimer::singleShot(100, m_mock, &MockBackend::simulateCardInserted);
+        QVERIFY(m_cmdSet->waitForCard());
     }
 };
 
