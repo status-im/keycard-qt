@@ -5,10 +5,12 @@
 #include "keycard-qt/keycard_channel.h"
 #include "keycard-qt/card_command.h"
 #include "mocks/mock_backend.h"
+#include <QElapsedTimer>
 #include <QHash>
 #include <QMutex>
 #include <atomic>
 #include <memory>
+#include <thread>
 
 using namespace Keycard;
 using namespace Keycard::Test;
@@ -86,6 +88,26 @@ private:
         QMetaObject::Connection m_connection;
     };
 
+    /// Runs executeCommandSync(cmd) on a helper thread; true if it returned within @p timeoutMs
+    bool executeSyncWithin(std::unique_ptr<CardCommand> cmd, int timeoutMs, CommandResult* result) {
+        std::atomic<bool> done{false};
+        std::thread caller([&]() {
+            *result = m_commMgr->executeCommandSync(std::move(cmd));
+            done = true;
+        });
+        QElapsedTimer elapsed;
+        elapsed.start();
+        while (!done && elapsed.elapsed() < timeoutMs) {
+            QTest::qWait(20);
+        }
+        const bool returned = done;
+        if (!returned) {
+            m_commMgr->cancelPendingOperations(QStringLiteral("test cleanup")); // release the stuck caller
+        }
+        caller.join();
+        return returned;
+    }
+
     /// A card is present and initialized, the manager idle: enqueued commands run right away
     void readyCard() {
         m_mock->queueResponse(QByteArray::fromHex("8041") + QByteArray(65, 0x04) + QByteArray::fromHex("9000"));
@@ -137,6 +159,42 @@ private slots:
             QTRY_VERIFY_WITH_TIMEOUT(completed.contains(waitToken), 2000);
             QVERIFY(!completed.succeeded(waitToken));
         }
+    }
+
+    void testCancelledBatchRejectsItsLaterCommands() {
+        // A composite runs in a batch; its card is removed and the cancellation has already flushed the
+        // queue when the composite enqueues its next command: that command must fail, not wait for a card
+        readyCard();
+        m_commMgr->startBatchOperations();
+        m_mock->simulateCardRemoved();
+        QTRY_VERIFY_WITH_TIMEOUT(!m_cmdSet->isCardReady(), 2000);
+        m_commMgr->cancelPendingOperations(QStringLiteral("Card removed"));
+        QTest::qWait(100); // let the cancellation itself run
+
+        CommandResult result;
+        const bool returned = executeSyncWithin(std::make_unique<NoopCommand>(), 2000, &result);
+        m_commMgr->endBatchOperations();
+
+        QVERIFY2(returned, "a command of a cancelled batch must not wait for a card");
+        QVERIFY(!result.success);
+        QCOMPARE(result.reason, CommandResultType::Cancelled);
+        QCOMPARE(result.error, QStringLiteral("Card removed"));
+    }
+
+    void testNextBatchIsNotAffectedByAnEarlierCancellation() {
+        readyCard();
+        m_commMgr->startBatchOperations();
+        m_commMgr->cancelPendingOperations(QStringLiteral("Card removed"));
+        m_commMgr->endBatchOperations();
+        QTest::qWait(100);
+
+        m_commMgr->startBatchOperations();
+        CommandResult result;
+        const bool returned = executeSyncWithin(std::make_unique<NoopCommand>(), 5000, &result);
+        m_commMgr->endBatchOperations();
+
+        QVERIFY(returned);
+        QVERIFY2(result.success, qPrintable(result.error));
     }
 
     void testCommandEnqueuedAfterCancelIsNotAborted() {
