@@ -332,6 +332,13 @@ private:
     // Batch operations ref-count - > 0 means don't stop detection on empty queue
     int m_batchOperationDepth;
     QMutex m_batchMutex;
+    quint64 m_batchId = 0;  // Current (or last) batch; a new one starts at depth 0 -> 1 (m_batchMutex)
+
+    // A cancellation during a batch cancels the whole batch: commands it enqueues afterwards are rejected
+    // until it ends (see enqueueCommand()). Guarded by m_queueMutex, so a command is either rejected or
+    // enqueued in time to be flushed by the cancellation.
+    quint64 m_cancelledBatchId = 0;  // 0: none
+    QString m_cancelledBatchReason;
 };
 
 } // namespace Keycard

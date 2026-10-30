@@ -136,6 +136,20 @@ void CommunicationManager::cancelPendingOperations(const QString& reason) {
     if (m_commandSet) {
         m_commandSet->abortWaitForCard();
     }
+    // A cancellation during a batch (a composite operation) also covers the commands that batch
+    // enqueues after it; record it before the flush below is posted
+    quint64 batchId = 0;
+    {
+        QMutexLocker batchLocker(&m_batchMutex);
+        if (m_batchOperationDepth > 0) {
+            batchId = m_batchId;
+        }
+    }
+    if (batchId != 0) {
+        QMutexLocker queueLocker(&m_queueMutex);
+        m_cancelledBatchId = batchId;
+        m_cancelledBatchReason = reason;
+    }
     if (QThread::currentThread() == thread()) {
         cancelPendingOperationsInternal(reason);
         return;
@@ -274,6 +288,7 @@ void CommunicationManager::startBatchOperations() {
         QMutexLocker locker(&m_batchMutex);
         if (m_batchOperationDepth == 0) {
             becameActive = true;
+            ++m_batchId;  // a new batch: an earlier batch's cancellation does not apply to it
         }
         ++m_batchOperationDepth;
         depth = m_batchOperationDepth;
@@ -332,10 +347,40 @@ QUuid CommunicationManager::enqueueCommand(std::unique_ptr<CardCommand> cmd) {
         cmd->setCancelGeneration(m_commandSet->waitAbortGeneration());
     }
     
+    QString rejectedReason;
     {
         QMutexLocker locker(&m_queueMutex);
-        m_queue.push(std::move(cmd));
-        m_queueNotEmpty.wakeAll();
+        // Lock order queue -> batch, as in processQueue()
+        bool batchCancelled = false;
+        if (m_cancelledBatchId != 0) {
+            QMutexLocker batchLocker(&m_batchMutex);
+            batchCancelled = m_batchOperationDepth > 0 && m_batchId == m_cancelledBatchId;
+        }
+        if (batchCancelled) {
+            rejectedReason = m_cancelledBatchReason;
+        } else {
+            m_queue.push(std::move(cmd));
+            m_queueNotEmpty.wakeAll();
+        }
+    }
+
+    if (!rejectedReason.isEmpty()) {
+        // The batch this command belongs to was cancelled (e.g. its card was removed): fail it now, or it
+        // would wait for a card nobody is going to insert for it
+        qDebug() << "CommunicationManager: Rejecting command" << cmdName << "- its batch was cancelled:"
+                 << rejectedReason;
+        const CommandResult result = CommandResult::fromError(rejectedReason, CommandResultType::Cancelled);
+        {
+            QMutexLocker syncLocker(&m_syncMutex);
+            if (m_pendingSync.contains(token)) {
+                auto sync = m_pendingSync.take(token);
+                sync->completed = true;
+                sync->result = result;
+                sync->condition.wakeAll();
+            }
+        }
+        emit commandCompleted(token, result);
+        return token;
     }
 
     if (m_commandSet && m_commandSet->isCardReady()) {
