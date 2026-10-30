@@ -132,6 +132,7 @@ void CommunicationManager::cancelPendingOperations(const QString& reason) {
     }
     // A command already running may be blocked waiting for a card, on the thread this cancellation is
     // queued to; release it directly so it fails instead of waiting for a card that is not coming.
+    // Commands enqueued from now on start from the new generation and are not affected.
     if (m_commandSet) {
         m_commandSet->abortWaitForCard();
     }
@@ -326,9 +327,9 @@ QUuid CommunicationManager::enqueueCommand(std::unique_ptr<CardCommand> cmd) {
     
     qDebug() << "CommunicationManager: Enqueueing command" << cmdName << "token:" << token;
 
-    // A new operation starts: an abort meant for an earlier, cancelled one must not end its waits
+    // Stamp the command: only a cancellation after this point aborts its waits for a card
     if (m_commandSet) {
-        m_commandSet->clearWaitForCardAbort();
+        cmd->setCancelGeneration(m_commandSet->waitAbortGeneration());
     }
     
     {
@@ -760,6 +761,10 @@ void CommunicationManager::processQueue() {
     qDebug() << "CommunicationManager: Executing command:" << cmdName << "token:" << token;
     
     setState(State::Processing);
+    // Its waits for a card abort only on a cancellation after it was enqueued (see enqueueCommand())
+    if (m_commandSet) {
+        m_commandSet->setWaitAbortBaseline(cmd->cancelGeneration());
+    }
     
     CommandResult result;
     try {

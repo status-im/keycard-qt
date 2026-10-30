@@ -1620,7 +1620,8 @@ bool CommandSet::waitForCard()
         return true;
     }
 
-    if (m_waitForCardAborted.exchange(false)) {
+    const auto cancelled = [this]() { return m_waitAbortGeneration.load() > m_waitAbortBaseline.load(); };
+    if (cancelled()) {
         qDebug() << "CommandSet::waitForCard(): Aborted, the operation was cancelled";
         m_lastError = QStringLiteral("Waiting for the card was cancelled");
         return false;
@@ -1637,8 +1638,8 @@ bool CommandSet::waitForCard()
     // posted events it gets to deliver.
     QTimer abortPoll;
     abortPoll.setInterval(50);
-    QObject::connect(&abortPoll, &QTimer::timeout, &loop, [this, &loop, &aborted]() {
-        if (m_waitForCardAborted.exchange(false)) {
+    QObject::connect(&abortPoll, &QTimer::timeout, &loop, [&cancelled, &loop, &aborted]() {
+        if (cancelled()) {
             aborted = true;
             loop.quit();
         }
@@ -1803,12 +1804,7 @@ APDU::Response CommandSet::send(const APDU::Command& cmd, bool secure)
 
 void CommandSet::abortWaitForCard()
 {
-    m_waitForCardAborted = true;
-}
-
-void CommandSet::clearWaitForCardAbort()
-{
-    m_waitForCardAborted = false;
+    ++m_waitAbortGeneration;
 }
 
 void CommandSet::startDetection() {

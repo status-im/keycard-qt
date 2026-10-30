@@ -5,10 +5,45 @@
 #include "keycard-qt/keycard_channel.h"
 #include "keycard-qt/card_command.h"
 #include "mocks/mock_backend.h"
+#include <QHash>
+#include <QMutex>
+#include <atomic>
 #include <memory>
 
 using namespace Keycard;
 using namespace Keycard::Test;
+
+namespace {
+
+/// Optionally removes the card, then waits for one: a command blocked in waitForCard()
+class WaitForCardCommand : public CardCommand {
+public:
+    WaitForCardCommand(MockBackend* mock, std::atomic<bool>* waiting) : m_mock(mock), m_waiting(waiting) {}
+
+    CommandResult execute(CommandSet* cmdSet) override {
+        if (m_mock) {
+            m_mock->simulateCardRemoved();
+        }
+        if (m_waiting) {
+            *m_waiting = true;
+        }
+        return cmdSet->waitForCard() ? CommandResult::fromSuccess() : CommandResult::fromError(cmdSet->lastError());
+    }
+    QString name() const override { return QStringLiteral("WAIT_FOR_CARD"); }
+
+private:
+    MockBackend* m_mock;
+    std::atomic<bool>* m_waiting;
+};
+
+/// Needs no card: some other work queued by another caller
+class NoopCommand : public CardCommand {
+public:
+    CommandResult execute(CommandSet*) override { return CommandResult::fromSuccess(); }
+    QString name() const override { return QStringLiteral("NOOP"); }
+};
+
+} // namespace
 
 /**
  * @brief Tests for CommunicationManager queue management
@@ -30,6 +65,36 @@ private:
     std::shared_ptr<CommandSet> m_cmdSet;
     std::unique_ptr<CommunicationManager> m_commMgr;
     MockBackend* m_mock;
+
+    /// Records commandCompleted (emitted on the communication thread; CommandResult is no metatype)
+    class CompletedCommands {
+    public:
+        explicit CompletedCommands(CommunicationManager* mgr) {
+            m_connection = QObject::connect(mgr, &CommunicationManager::commandCompleted, mgr,
+                [this](const QUuid& token, const CommandResult& result) {
+                    QMutexLocker locker(&m_mutex);
+                    m_success.insert(token, result.success);
+                }, Qt::DirectConnection);
+        }
+        ~CompletedCommands() { QObject::disconnect(m_connection); }
+        bool contains(const QUuid& token) const { QMutexLocker locker(&m_mutex); return m_success.contains(token); }
+        bool succeeded(const QUuid& token) const { QMutexLocker locker(&m_mutex); return m_success.value(token); }
+
+    private:
+        mutable QMutex m_mutex;
+        QHash<QUuid, bool> m_success;
+        QMetaObject::Connection m_connection;
+    };
+
+    /// A card is present and initialized, the manager idle: enqueued commands run right away
+    void readyCard() {
+        m_mock->queueResponse(QByteArray::fromHex("8041") + QByteArray(65, 0x04) + QByteArray::fromHex("9000"));
+        m_commMgr->startDetection();
+        m_mock->simulateCardInserted();
+        QTRY_VERIFY_WITH_TIMEOUT(m_cmdSet->isCardReady()
+                                 && m_commMgr->state() != CommunicationManager::State::Initializing, 5000);
+        m_mock->setReconnectWhenWaiting(false);
+    }
     
 private slots:
     void init() {
@@ -49,6 +114,49 @@ private slots:
         m_mock = nullptr;
     }
     
+    // ========================================================================
+    // Cancellation of a command waiting for a card
+    // ========================================================================
+
+    void testCancelThenEnqueueStillReleasesTheWaitingCommand() {
+        // Repeated: the waiting command polls for the abort every 50 ms, so a single round can miss a
+        // regression when a poll happens to fall between the cancel and the enqueue
+        CompletedCommands completed(m_commMgr.get());
+        for (int round = 0; round < 3; ++round) {
+            readyCard();
+            std::atomic<bool> waiting{false};
+            auto waitCmd = std::make_unique<WaitForCardCommand>(m_mock, &waiting);
+            const QUuid waitToken = waitCmd->token();
+            m_commMgr->enqueueCommand(std::move(waitCmd));
+            QTRY_VERIFY_WITH_TIMEOUT(waiting.load(), 5000);
+
+            // Cancel, then enqueue right away, before the waiting command polls for the abort
+            m_commMgr->cancelPendingOperations(QStringLiteral("Card removed"));
+            m_commMgr->enqueueCommand(std::make_unique<NoopCommand>());
+
+            QTRY_VERIFY_WITH_TIMEOUT(completed.contains(waitToken), 2000);
+            QVERIFY(!completed.succeeded(waitToken));
+        }
+    }
+
+    void testCommandEnqueuedAfterCancelIsNotAborted() {
+        readyCard();
+        m_mock->simulateCardRemoved();
+        m_commMgr->cancelPendingOperations(QStringLiteral("Card removed"));
+        QTest::qWait(100); // let the cancellation itself run
+
+        CompletedCommands completed(m_commMgr.get());
+        auto waitCmd = std::make_unique<WaitForCardCommand>(nullptr, nullptr);
+        const QUuid waitToken = waitCmd->token();
+        m_commMgr->enqueueCommand(std::move(waitCmd));
+        QTest::qWait(300);
+        QVERIFY2(!completed.contains(waitToken), "the earlier cancellation must not abort a later command");
+
+        m_mock->simulateCardInserted();
+        QTRY_VERIFY_WITH_TIMEOUT(completed.contains(waitToken), 5000);
+        QVERIFY(completed.succeeded(waitToken));
+    }
+
     // ========================================================================
     // Basic Enqueueing Tests
     // ========================================================================
