@@ -79,12 +79,20 @@ public:
      * @brief Get command name for debugging
      */
     virtual QString name() const = 0;
+
+    /**
+     * @brief Cancellation generation when this command was enqueued (CommandSet::waitAbortGeneration()):
+     * a later cancellation aborts its waits for a card, an earlier one does not.
+     */
+    quint64 cancelGeneration() const { return m_cancelGeneration; }
+    void setCancelGeneration(quint64 generation) { m_cancelGeneration = generation; }
     
 protected:
     CardCommand() : m_token(QUuid::createUuid()) {}
     
 private:
     QUuid m_token;
+    quint64 m_cancelGeneration = 0;
 };
 
 // Concrete command declarations

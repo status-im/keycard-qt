@@ -572,24 +572,14 @@ private slots:
         QVERIFY(!m_cmdSet->waitForCard());
     }
 
-    void testWaitForCardAbortIsConsumed() {
+    void testWaitForCardAbortSparesLaterOperations() {
         m_mock->setReconnectWhenWaiting(false);
         m_mock->simulateCardRemoved();
         m_cmdSet->abortWaitForCard();
         QVERIFY(!m_cmdSet->waitForCard());
 
-        // The next wait is not aborted: it lasts until a card arrives
-        QTimer::singleShot(100, m_mock, &MockBackend::simulateCardInserted);
-        QVERIFY(m_cmdSet->waitForCard());
-    }
-
-    void testClearedWaitForCardAbortDoesNotEndWait() {
-        // A new operation withdraws an abort no wait consumed
-        m_mock->setReconnectWhenWaiting(false);
-        m_mock->simulateCardRemoved();
-        m_cmdSet->abortWaitForCard();
-        m_cmdSet->clearWaitForCardAbort();
-
+        // An operation started from the new generation is not aborted: it waits until a card arrives
+        m_cmdSet->setWaitAbortBaseline(m_cmdSet->waitAbortGeneration());
         QTimer::singleShot(100, m_mock, &MockBackend::simulateCardInserted);
         QVERIFY(m_cmdSet->waitForCard());
     }

@@ -325,16 +325,20 @@ public:
     bool waitForCard();
 
     /**
-     * @brief Make the current or next waitForCard() give up (thread-safe): the operation waiting for
-     * a card was cancelled, e.g. because the card was removed. Consumed by the wait it aborts.
+     * @brief Cancel the operations started so far (thread-safe): their waitForCard() calls give up,
+     * whether waiting already or not yet, e.g. because the card was removed. Advances the cancellation
+     * generation; operations started from the new generation are not affected.
      */
     void abortWaitForCard();
 
+    /** @brief Current cancellation generation (thread-safe), advanced by abortWaitForCard(). */
+    quint64 waitAbortGeneration() const { return m_waitAbortGeneration.load(); }
+
     /**
-     * @brief Withdraw an abort that no wait consumed (thread-safe), so it cannot cut short the wait of
-     * an operation started after it.
+     * @brief Generation the running operation started from (thread-safe): its waits for a card are
+     * aborted once abortWaitForCard() moves the generation past it.
      */
-    void clearWaitForCardAbort();
+    void setWaitAbortBaseline(quint64 generation) { m_waitAbortBaseline = generation; }
 
     /**
      * @brief Ensure pairing is available for current card
@@ -619,7 +623,8 @@ private:
     
 
     std::atomic_bool m_cardReady = false;
-    std::atomic_bool m_waitForCardAborted = false;  // see abortWaitForCard()
+    std::atomic<quint64> m_waitAbortGeneration{0};  // see abortWaitForCard()
+    std::atomic<quint64> m_waitAbortBaseline{0};    // see setWaitAbortBaseline()
 };
 
 } // namespace Keycard
