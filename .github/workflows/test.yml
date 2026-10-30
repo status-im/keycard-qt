@@ -234,9 +234,9 @@ jobs:
           cd build
           if [ "${{ runner.os }}" = "Windows" ]; then
             # Windows: retry flaky tests up to 3 times
-            ctest --output-on-failure --verbose -C Release --repeat until-pass:3
+            ctest --output-on-failure --verbose -C Release --repeat until-pass:3 -LE simulator
           else
-            ctest --output-on-failure --verbose
+            ctest --output-on-failure --verbose -LE simulator
           fi
 
       - name: Test Summary
@@ -261,3 +261,86 @@ jobs:
             build/**/*.a
           if-no-files-found: ignore
           retention-days: 7
+
+  simulator-tests:
+    runs-on: ubuntu-22.04
+    name: Linux (keycard-simulator)
+    timeout-minutes: 30
+    env:
+      # The simulator tests connect to this port; on any other they skip and this job fails.
+      SIM_PORT: 9025
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: false
+          fetch-depth: 1
+
+      - name: Checkout keycard-simulator
+        uses: actions/checkout@v4
+        with:
+          repository: status-im/status-keycard-qt
+          ref: master
+          path: status-keycard-qt
+          fetch-depth: 1
+          sparse-checkout: test/keycard-simulator
+
+      - name: Report Java toolchain
+        shell: bash
+        run: |
+          echo "status-keycard-qt: $(git -C status-keycard-qt rev-parse HEAD)"
+          echo "JAVA_HOME=${JAVA_HOME:-<unset>}"
+          command -v java javac
+          java -version
+          javac -version
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v3
+        with:
+          version: '6.9.2'
+          arch: linux_gcc_64
+          target: desktop
+          cache: true
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends libpcsclite-dev pkg-config libssl-dev
+
+      - name: Build keycard simulator
+        shell: bash
+        run: status-keycard-qt/test/keycard-simulator/build.sh
+
+      - name: Configure and build simulator tests
+        shell: bash
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+          cmake --build build -j"$(nproc)" --target \
+            test_simulator_smoke test_simulator_pin_blocking \
+            test_simulator_puk_unblock test_simulator_factory_reset
+
+      - name: Start keycard simulator
+        shell: bash
+        run: |
+          nohup status-keycard-qt/test/keycard-simulator/run.sh "$SIM_PORT" > simulator.log 2>&1 &
+          for i in $(seq 1 60); do
+            reply="$( (exec 3<>"/dev/tcp/127.0.0.1/$SIM_PORT" && printf 'PING\n' >&3 && read -r -t 5 r <&3 && echo "$r") 2>/dev/null || true)"
+            if [ "${reply%$'\r'}" = "OK" ]; then
+              echo "keycard-simulator answered PING on port $SIM_PORT after ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::keycard-simulator did not answer PING on port $SIM_PORT within 60s"
+          cat simulator.log
+          exit 1
+
+      - name: Run simulator tests
+        shell: bash
+        run: .github/scripts/run-simulator-tests.sh build
+
+      - name: Simulator log
+        if: always()
+        shell: bash
+        run: cat simulator.log 2>/dev/null || echo "no simulator log"

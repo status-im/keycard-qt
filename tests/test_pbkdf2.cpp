@@ -9,6 +9,7 @@
 #include <QElapsedTimer>
 #include <QCryptographicHash>
 #include <QMessageAuthenticationCode>
+#include <QElapsedTimer>
 
 // We need to test the internal PBKDF2 function
 // Since it's static in command_set.cpp, we'll reimplement it here for testing
