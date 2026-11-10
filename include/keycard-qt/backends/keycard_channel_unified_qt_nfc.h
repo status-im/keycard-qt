@@ -55,6 +55,10 @@ private:
     // State management
     ChannelState m_state = ChannelState::Idle;
     bool m_detectionActive = false;
+    // Detection was asked for (startDetection()) and not stopped since. Unlike
+    // m_detectionActive it stays set while NFC is off or the app not active yet, so
+    // turning NFC on resumes detection only while it is still wanted.
+    bool m_detectionWanted = false;
 
 #ifdef Q_OS_ANDROID
     // Qt NFC on Android can fail if discovery is started before the Activity/app is fully active.

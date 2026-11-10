@@ -49,6 +49,7 @@ KeycardChannelUnifiedQtNfc::~KeycardChannelUnifiedQtNfc()
 void KeycardChannelUnifiedQtNfc::startDetection()
 {
     qDebug() << "KeycardChannelUnifiedQtNfc::startDetection()";
+    m_detectionWanted = true;
 
 #ifdef Q_OS_ANDROID
     // Android-only: emitted when the OS NFC adapter is toggled on/off (or transitioning).
@@ -81,7 +82,9 @@ void KeycardChannelUnifiedQtNfc::startDetection()
                 m_appStateConn = {};
 
                 QTimer::singleShot(0, this, [this]() {
-                    this->startDetection();
+                    if (m_detectionWanted) {  // not stopped while this was pending
+                        this->startDetection();
+                    }
                 });
             });
         }
@@ -116,8 +119,13 @@ void KeycardChannelUnifiedQtNfc::startDetection()
 
 void KeycardChannelUnifiedQtNfc::stopDetection()
 {
+    m_detectionWanted = false;
     if (!m_detectionActive) {
 #ifdef Q_OS_ANDROID
+        // Detection may have been asked for while NFC was off (or the app not active):
+        // turning NFC on must not start it after this stop.
+        QObject::disconnect(m_manager, &QNearFieldManager::adapterStateChanged,
+            this, &KeycardChannelUnifiedQtNfc::onAdapterStateChanged);
         if (m_waitingForAppActive && m_appStateConn) {
             QObject::disconnect(m_appStateConn);
             m_appStateConn = {};
@@ -267,9 +275,14 @@ void KeycardChannelUnifiedQtNfc::onAdapterStateChanged(QNearFieldManager::Adapte
         case QNearFieldManager::AdapterState::Online: {
             emit readerAvailabilityChanged(true);
 
-            // If higher-level logic expects us to be scanning, (re)start now.
+            // If higher-level logic expects us to be scanning, (re)start now - not when
+            // detection was stopped meanwhile (also while this deferral was pending).
             // Use event-loop deferral to avoid re-entrancy if this signal fires during Qt NFC internals.
-            QTimer::singleShot(0, this, [this]() { this->setState(ChannelState::WaitingForCard); });
+            QTimer::singleShot(0, this, [this]() {
+                if (m_detectionWanted) {
+                    this->setState(ChannelState::WaitingForCard);
+                }
+            });
             break;
         }
 

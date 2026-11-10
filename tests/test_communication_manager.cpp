@@ -1,5 +1,9 @@
 #include <QTest>
 #include <QSignalSpy>
+#include <QSemaphore>
+#include <QThread>
+#include <QMetaMethod>
+#include <atomic>
 #include "keycard-qt/communication_manager.h"
 #include "keycard-qt/command_set.h"
 #include "keycard-qt/keycard_channel.h"
@@ -16,6 +20,25 @@ using namespace Keycard::Test;
  * Tests lifecycle, state machine, card detection, error handling, and batch operations.
  * These are the foundational tests for the thread-safe queue-based architecture.
  */
+// Pauses the thread that connects to targetDetectionStopped - a card wait setting up -
+// until released.
+class PausingChannel : public KeycardChannel {
+public:
+    using KeycardChannel::KeycardChannel;
+    std::atomic<bool> armed{false};
+    QSemaphore paused;
+    QSemaphore release;
+
+protected:
+    void connectNotify(const QMetaMethod& signal) override {
+        if (armed && signal == QMetaMethod::fromSignal(&KeycardChannel::targetDetectionStopped)) {
+            armed = false;
+            paused.release();
+            release.acquire();
+        }
+    }
+};
+
 class TestCommunicationManager : public QObject {
     Q_OBJECT
     
@@ -120,6 +143,80 @@ private slots:
         QCOMPARE(m_commMgr->state(), CommunicationManager::State::Idle);
     }
     
+    // A client that stopped detection (ending its session) must not have the manager
+    // restart it: here a card initialization that was in flight when detection stopped
+    // fails afterwards, which used to restart detection from its error handling.
+    void testStoppedDetectionIsNotRestartedByAFailedCardInitialization() {
+        m_mock->setReconnectWhenWaiting(false);
+        std::atomic<bool> transmitting{false};
+        auto release = std::make_shared<QSemaphore>();
+        m_mock->setResponseHandler([&transmitting, release](const QByteArray&) -> QByteArray {
+            transmitting = true;
+            release->acquire();
+            throw std::runtime_error("card I/O failed after detection was stopped");
+        });
+        QVERIFY(m_commMgr->init(m_cmdSet));
+        QVERIFY(m_commMgr->startDetection());
+        QTRY_COMPARE(m_mock->state(), ChannelState::WaitingForCard);
+
+        m_mock->simulateCardInserted();  // the communication thread starts initializing it
+        QTRY_VERIFY(transmitting.load());
+
+        m_commMgr->stopDetection();
+        QTRY_COMPARE(m_mock->state(), ChannelState::Idle);
+
+        release->release();  // the in-flight initialization fails now
+        for (int i = 0; i < 20; ++i) {
+            QCoreApplication::processEvents();
+            QThread::msleep(5);
+        }
+        QCOMPARE(m_mock->state(), ChannelState::Idle);
+    }
+
+    // A card wait that is setting up when detection is stopped - past its first
+    // cancellation check - must not start detection once it goes on.
+    void testCardWaitAbortedWhileSettingUpDoesNotStartDetection() {
+        auto* backend = new MockBackend();
+        backend->setReconnectWhenWaiting(false);
+        auto channel = std::make_shared<PausingChannel>(backend);
+        auto cmdSet = std::make_shared<CommandSet>(channel, nullptr, nullptr);
+        CommunicationManager mgr;
+        QVERIFY(mgr.init(cmdSet));
+
+        channel->armed = true;
+        std::atomic<bool> waited{true};
+        std::unique_ptr<QThread> worker(QThread::create([&]() { waited = cmdSet->waitForCard(); }));
+        worker->start();
+        QVERIFY(channel->paused.tryAcquire(1, 5000));  // the wait is setting up
+
+        mgr.stopDetection();
+        QTRY_COMPARE(backend->state(), ChannelState::Idle);
+
+        channel->release.release();
+        QVERIFY(worker->wait(5000));
+        for (int i = 0; i < 10; ++i) {
+            QCoreApplication::processEvents();
+        }
+        QVERIFY(!waited.load());
+        QCOMPARE(backend->state(), ChannelState::Idle);
+        mgr.stop();
+    }
+
+    // A start queued before detection was stopped does not run after it.
+    void testStartQueuedBeforeStopDoesNotRun() {
+        m_mock->setReconnectWhenWaiting(false);
+        QVERIFY(m_commMgr->init(m_cmdSet));
+        QVERIFY(m_commMgr->startDetection());  // queued to the command set
+        m_commMgr->stopDetection();            // before it is delivered
+        for (int i = 0; i < 5; ++i) {
+            QCoreApplication::processEvents();
+        }
+        QCOMPARE(m_mock->state(), ChannelState::Idle);
+
+        QVERIFY(m_commMgr->startDetection());  // a later start works
+        QTRY_COMPARE(m_mock->state(), ChannelState::WaitingForCard);
+    }
+
     void testStopWithoutInit() {
         // Should not crash
         m_commMgr->stop();

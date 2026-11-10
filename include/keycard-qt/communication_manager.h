@@ -10,6 +10,7 @@
 #include <QWaitCondition>
 #include <QHash>
 #include <QElapsedTimer>
+#include <atomic>
 #include <QCoreApplication>
 #include <QEventLoop>
 #include <memory>
@@ -90,6 +91,11 @@ public:
      * Stops monitoring for cards but keeps the communication thread alive.
      * Queue processing continues for enqueued commands.
      * Call startDetection() to resume monitoring.
+     *
+     * Until then the manager does not restart detection by itself (a failed card
+     * initialization, a lost card, a failed or newly enqueued command), and a start
+     * queued before this call does not run: a client that stopped detection - ending
+     * its session - must not have it come back.
      */
     void stopDetection() override;
 
@@ -328,6 +334,19 @@ private:
     
     // Running flag
     bool m_running;
+
+    // Set by stopDetection(), cleared by startDetection(). The manager's own restarts
+    // only happen while it is clear - as before any stopDetection().
+    std::atomic<bool> m_detectionStoppedByClient{false};
+    // Advanced by stopDetection(); a queued start only runs in the generation it was
+    // queued in.
+    std::atomic<quint64> m_detectionGeneration{0};
+    void queueDetectionStart(quint64 generation);
+    // The manager's own restart of detection (it pauses detection while idle): not once
+    // the client stopped detection.
+    void restartDetection();
+    // The manager's own pause while idle: unlike stopDetection(), restarts stay allowed.
+    void pauseDetection();
     
     // Batch operations ref-count - > 0 means don't stop detection on empty queue
     int m_batchOperationDepth;
