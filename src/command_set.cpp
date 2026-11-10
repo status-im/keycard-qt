@@ -1620,6 +1620,10 @@ bool CommandSet::waitForCard()
         return true;
     }
 
+    // Captured before the cancellation check: an abort from here on must keep the
+    // WaitingForCard queued below from running (see there), even an abort that comes
+    // while this wait sets up.
+    const quint64 abortGeneration = m_waitAbortGeneration.load();
     const auto cancelled = [this]() { return m_waitAbortGeneration.load() > m_waitAbortBaseline.load(); };
     if (cancelled()) {
         qDebug() << "CommandSet::waitForCard(): Aborted, the operation was cancelled";
@@ -1677,9 +1681,15 @@ bool CommandSet::waitForCard()
     // Qt::AutoConnection (default) handles thread safety automatically:
     // - Same thread: DirectConnection (synchronous)
     // - Different thread: QueuedConnection (asynchronous)
+    // Delivered queued when the channel lives on another thread: not after the wait was
+    // aborted meanwhile (detection stopped by the client), or it would restart detection.
     bool success = QMetaObject::invokeMethod(
         m_channel.get(),
-        [this]() {
+        [this, abortGeneration]() {
+            if (m_waitAbortGeneration.load() != abortGeneration) {
+                qDebug() << "CommandSet::waitForCard(): Aborted before detection started, not starting it";
+                return;
+            }
             m_channel->setState(Keycard::ChannelState::WaitingForCard);
         }
     );
