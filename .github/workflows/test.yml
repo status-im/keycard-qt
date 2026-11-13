@@ -28,14 +28,14 @@ jobs:
             qt_target: desktop
             cmake_generator: "Unix Makefiles"
             
-          - os: macos-14
+          - os: macos-15
             name: macOS (ARM64)
             qt_arch: clang_64
             qt_target: desktop
             cmake_generator: "Unix Makefiles"
             
           # iOS builds
-          - os: macos-14
+          - os: macos-15
             name: iOS
             qt_arch: ios
             qt_target: ios
