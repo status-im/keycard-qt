@@ -1,6 +1,7 @@
 #include "keycard-qt/communication_manager.h"
 #include <QDebug>
 #include <QTimer>
+#include <QPointer>
 #include <QCoreApplication>
 #include <QVector>
 
@@ -105,12 +106,48 @@ bool CommunicationManager::startDetection() {
     }
     
     qDebug() << "CommunicationManager: Starting card detection...";
-    QMetaObject::invokeMethod(m_commandSet.get(),
-                               &CommandSet::startDetection,
-                               Qt::QueuedConnection);
+    m_detectionStoppedByClient = false;
+    queueDetectionStart(m_detectionGeneration.load());
     
     qDebug() << "CommunicationManager: Card detection started via CommandSet";
     return true;
+}
+
+void CommunicationManager::queueDetectionStart(quint64 generation) {
+    QPointer<CommunicationManager> self(this);
+    // The command set is the call's context: the call is dropped if it is deleted first.
+    // Not owned here, so a start that never runs doesn't keep the command set alive.
+    CommandSet* commandSet = m_commandSet.get();
+    QMetaObject::invokeMethod(commandSet, [self, commandSet, generation]() {
+        if (!self || self->m_detectionGeneration.load() != generation) {
+            qDebug() << "CommunicationManager: Dropping a detection start queued before detection was stopped";
+            return;
+        }
+        commandSet->startDetection();
+    }, Qt::QueuedConnection);
+}
+
+void CommunicationManager::restartDetection() {
+    if (!m_running || !m_commandSet) {
+        return;
+    }
+    // Read before the check: stopDetection() sets m_detectionStoppedByClient before it
+    // advances the generation, so a stop between the two leaves this start with a stale one.
+    const quint64 generation = m_detectionGeneration.load();
+    if (m_detectionStoppedByClient) {
+        qDebug() << "CommunicationManager: Detection was stopped, not restarting it";
+        return;
+    }
+    queueDetectionStart(generation);
+}
+
+void CommunicationManager::pauseDetection() {
+    if (!m_commandSet) {
+        return;
+    }
+    QMetaObject::invokeMethod(m_commandSet.get(),
+                               &CommandSet::stopDetection,
+                               Qt::QueuedConnection);
 }
 
 void CommunicationManager::stopDetection() {
@@ -119,9 +156,14 @@ void CommunicationManager::stopDetection() {
     }
     
     qDebug() << "CommunicationManager: Stopping card detection...";
-    QMetaObject::invokeMethod(m_commandSet.get(),
-                               &CommandSet::stopDetection,
-                               Qt::QueuedConnection);
+    // Order matters for restartDetection() and queueDetectionStart(): stopped first,
+    // then a new generation for starts already queued.
+    m_detectionStoppedByClient = true;
+    ++m_detectionGeneration;
+    // A command waiting for a card can't get one anymore; its wait would otherwise
+    // restart detection. Commands enqueued later start from the new abort generation.
+    m_commandSet->abortWaitForCard();
+    pauseDetection();
     
     qDebug() << "CommunicationManager: Card detection stopped via CommandSet";
 }
@@ -162,7 +204,7 @@ void CommunicationManager::cancelPendingOperations(const QString& reason) {
 void CommunicationManager::cancelPendingOperationsInternal(const QString& reason) {
     setState(State::Idle);
     emit operationCancelled(reason);
-    stopDetection();
+    pauseDetection();
     {
         QMutexLocker locker(&m_syncMutex);
         for (auto it = m_pendingSync.begin(); it != m_pendingSync.end();) {
@@ -387,7 +429,7 @@ QUuid CommunicationManager::enqueueCommand(std::unique_ptr<CardCommand> cmd) {
         QMetaObject::invokeMethod(this, &CommunicationManager::processQueue,
                                 Qt::QueuedConnection);
     } else {
-        startDetection();
+        restartDetection();
     }
     
     return token;
@@ -563,7 +605,7 @@ void CommunicationManager::onCardReady(const QString& uid) {
         processQueue();
     } catch (const std::runtime_error& e) {
         qWarning() << "CommunicationManager: Card initialization sequence threw exception:" << e.what();
-        startDetection();
+        restartDetection();
         return;
     } catch (...) {
         qWarning() << "CommunicationManager: Card initialization sequence threw unknown exception";
@@ -584,13 +626,13 @@ void CommunicationManager::onCardLost() {
 
     if (currentState == State::Initializing) {
         qDebug() << "CommunicationManager: Card lost during initialization, ignoring";
-        startDetection();
+        restartDetection();
         return;
     }
 
     if (currentState == State::Processing) {
         qDebug() << "CommunicationManager: Card lost during command processing, ignoring";
-        startDetection();
+        restartDetection();
         return;
     }
     
@@ -742,7 +784,7 @@ void CommunicationManager::processQueue() {
             locker.unlock();  // Release queue lock before calling stopDetection
             stateLocker.unlock();
             setState(State::Idle);
-            stopDetection();
+            pauseDetection();
         }
         return;
     }
@@ -823,8 +865,8 @@ void CommunicationManager::processQueue() {
                 m_queue.push(std::move(cmd));
                 m_queueNotEmpty.wakeOne();
             }
-            stopDetection();
-            startDetection();
+            pauseDetection();
+            restartDetection();
             return;
         }
         result = CommandResult::fromError(e.what());
