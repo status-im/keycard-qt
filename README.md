@@ -201,6 +201,18 @@ cd build
 ctest --output-on-failure
 ```
 
+Tests named `test_simulator_*` drive the real Keycard applet in
+[keycard-simulator](https://github.com/status-im/status-keycard-qt/tree/master/test/keycard-simulator)
+rather than a mock backend, so they cover what the applet itself owns: the PIN and PUK retry
+counters, pairing and factory reset. They need a JVM and a running simulator, and skip when none is
+listening:
+
+```bash
+status-keycard-qt/test/keycard-simulator/run.sh 9025
+cd build
+ctest -R simulator --output-on-failure
+```
+
 
 ## Credits
 
